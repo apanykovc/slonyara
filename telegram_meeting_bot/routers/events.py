@@ -58,21 +58,27 @@ def _build_filters(text: str) -> Dict[str, str]:
     return filters
 
 
-async def _context_for(message: Message, users: UserService, chats: ChatService) -> dict:
+async def _context_for(
+    message: Message,
+    users: UserService,
+    chats: ChatService,
+    *,
+    actor_id: int,
+) -> dict:
     if message.chat.type == ChatType.PRIVATE:
-        settings = await users.get(message.from_user.id)
+        settings = await users.get(actor_id)
         return {
             "language": settings.language,
             "timezone": settings.timezone,
             "lead_time": settings.lead_time_minutes,
-            "target_chat_id": message.from_user.id if settings.direct_notifications else None,
+            "target_chat_id": actor_id if settings.direct_notifications else None,
             "chat_id": None,
             "thread_id": None,
             "is_admin": True,
         }
     title = message.chat.full_name or message.chat.title or str(message.chat.id)
     chat_settings = await chats.get_settings(message.chat.id, title=title)
-    is_admin = await chats.is_admin(message.chat.id, message.from_user.id)
+    is_admin = await chats.is_admin(message.chat.id, actor_id)
     target_chat_id = message.chat.id if chat_settings.registered else None
     return {
         "language": chat_settings.language,
@@ -106,7 +112,7 @@ async def handle_events_list(
     telegram_sender: TelegramSender,
 ) -> None:
     filters = _build_filters(message.text or "")
-    context = await _context_for(message, users, chats)
+    context = await _context_for(message, users, chats, actor_id=message.from_user.id)
     if message.chat.type == ChatType.PRIVATE:
         event_list = await events.list_events(creator_id=message.from_user.id)
     else:
@@ -192,7 +198,12 @@ async def handle_pagination_callback(
     parts = callback.data.split(":")
     direction = parts[1]
     current_page = int(parts[2])
-    context = await _context_for(callback.message, users, chats)
+    context = await _context_for(
+        callback.message,
+        users,
+        chats,
+        actor_id=callback.from_user.id,
+    )
     if callback.message.chat.type == ChatType.PRIVATE:
         event_list = await events.list_events(creator_id=callback.from_user.id)
     else:
@@ -234,7 +245,7 @@ async def start_create_wizard(
     chats: ChatService,
     telegram_sender: TelegramSender,
 ) -> None:
-    context = await _context_for(message, users, chats)
+    context = await _context_for(message, users, chats, actor_id=message.from_user.id)
     await state.clear()
     await state.update_data(context=context)
     await state.set_state(CreateEventState.waiting_date)
@@ -633,7 +644,7 @@ async def handle_export(
     chats: ChatService,
     telegram_sender: TelegramSender,
 ) -> None:
-    context = await _context_for(message, users, chats)
+    context = await _context_for(message, users, chats, actor_id=message.from_user.id)
     tz = context["timezone"]
     if message.chat.type == ChatType.PRIVATE:
         creator_id = message.from_user.id
@@ -665,7 +676,7 @@ async def handle_debug_seed(
     chats: ChatService,
     telegram_sender: TelegramSender,
 ) -> None:
-    context = await _context_for(message, users, chats)
+    context = await _context_for(message, users, chats, actor_id=message.from_user.id)
     now = now_utc()
     base = now + timedelta(minutes=10)
     for idx in range(3):
@@ -702,7 +713,7 @@ async def handle_new_event(
         return
     if message.text.startswith("/"):
         return
-    context = await _context_for(message, users, chats)
+    context = await _context_for(message, users, chats, actor_id=message.from_user.id)
     parsed = parse_event(text, context["timezone"])
     if not parsed:
         await _safe_message(
