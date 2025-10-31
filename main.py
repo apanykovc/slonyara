@@ -6,6 +6,7 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
+from dotenv import load_dotenv
 
 from bot.config import load_config
 from bot.handlers import admin as admin_handlers
@@ -16,6 +17,8 @@ from bot.services.reminder import ReminderService
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    load_dotenv()
 
     config = load_config()
     parse_mode = getattr(ParseMode, config.bot.parse_mode.upper(), ParseMode.HTML)
