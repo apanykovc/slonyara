@@ -213,6 +213,12 @@ async def handle_move_input(
     )
 
 
+# NOTE: Both /admin and /register must provide immediate feedback so that
+# administrators always understand what to do next.  The dedicated /register
+# handler simply shortcuts straight into the registration wizard that used to
+# be reachable only through the inline admin menu.
+
+
 @router.message(Command("admin"))
 async def handle_admin_menu(
     message: Message,
@@ -245,6 +251,44 @@ async def handle_admin_menu(
         message.answer,
         text="Администрирование",
         reply_markup=markup,
+    )
+
+
+@router.message(Command("register"))
+async def handle_register_command(
+    message: Message,
+    chats: ChatService,
+    telegram_sender: TelegramSender,
+    state: FSMContext,
+) -> None:
+    if message.chat.type == ChatType.PRIVATE:
+        await telegram_sender.safe_tg_call(
+            "ui",
+            f"admin:register:private:{message.from_user.id}",
+            message.answer,
+            text="Добавьте меня в групповой чат и повторите команду" if message.from_user.language_code == "ru" else "Add me to a group chat and try again.",
+        )
+        return
+    if not await _is_admin(chats, message.chat.id, message.from_user.id):
+        settings = await chats.get_settings(message.chat.id)
+        await telegram_sender.safe_tg_call(
+            "ui",
+            f"admin:register:denied:{message.chat.id}:{message.from_user.id}",
+            message.answer,
+            text=get_text(settings.language, "permission_denied"),
+        )
+        return
+    settings = await chats.get_settings(
+        message.chat.id,
+        title=message.chat.full_name or message.chat.title or str(message.chat.id),
+    )
+    await state.set_state(AdminState.register_timezone)
+    await state.update_data(chat_id=message.chat.id, title=settings.title)
+    await telegram_sender.safe_tg_call(
+        "ui",
+        f"admin:register:cmd:{message.chat.id}",
+        message.answer,
+        text="Введите часовой пояс (например Europe/Moscow)",
     )
 
 
