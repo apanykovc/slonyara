@@ -34,6 +34,8 @@ class Texts:
     agenda_today: str
     agenda_tomorrow: str
     agenda_week: str
+    flow_expired: str
+    event_missing: str
 
 
 MESSAGES: Dict[str, Texts] = {
@@ -86,6 +88,8 @@ MESSAGES: Dict[str, Texts] = {
         agenda_today="Встречи сегодня:",
         agenda_tomorrow="Встречи на завтра:",
         agenda_week="Встречи на ближайшие 7 дней:",
+        flow_expired="Действие больше недоступно, начните заново.",
+        event_missing="Событие не найдено.",
     ),
     "en": Texts(
         start=(
@@ -136,6 +140,8 @@ MESSAGES: Dict[str, Texts] = {
         agenda_today="Today's meetings:",
         agenda_tomorrow="Tomorrow's meetings:",
         agenda_week="Next 7 days:",
+        flow_expired="This action has expired. Please start again.",
+        event_missing="Event could not be found.",
     ),
 }
 

@@ -607,6 +607,13 @@ async def handle_destination_callback(
     draft_id = parts[2]
     stored = events.get_draft(draft_id)
     if not stored:
+        settings = await users.get(callback.from_user.id)
+        await telegram_sender.safe_tg_call(
+            "ui",
+            f"dest:expired:{draft_id}",
+            callback.message.edit_text,
+            text=get_text(settings.language, "flow_expired"),
+        )
         return
     draft, meta = stored
     language = meta.get("language", "ru")
@@ -622,12 +629,26 @@ async def handle_destination_callback(
         return
 
     if action != "set" or len(parts) < 4:
+        await telegram_sender.safe_tg_call(
+            "ui",
+            f"dest:invalid:{draft_id}",
+            callback.message.edit_text,
+            text=get_text(language, "flow_expired"),
+        )
+        events.pop_draft(draft_id)
         return
 
     option_id = parts[3]
     options = {option["id"]: option for option in meta.get("options", [])}
     option = options.get(option_id)
     if not option:
+        await telegram_sender.safe_tg_call(
+            "ui",
+            f"dest:missing:{draft_id}:{option_id}",
+            callback.message.edit_text,
+            text=get_text(language, "flow_expired"),
+        )
+        events.pop_draft(draft_id)
         return
 
     draft.target_chat_id = option.get("target_chat_id")
@@ -706,6 +727,7 @@ async def handle_conflict_callbacks(
     events: EventsService,
     telegram_sender: TelegramSender,
     state: FSMContext,
+    users: UserService,
 ) -> None:
     if not callback.message:
         return
@@ -714,6 +736,13 @@ async def handle_conflict_callbacks(
     draft_id = parts[2]
     stored = events.get_draft(draft_id)
     if not stored:
+        settings = await users.get(callback.from_user.id)
+        await telegram_sender.safe_tg_call(
+            "ui",
+            f"conflict:expired:{draft_id}",
+            callback.message.edit_text,
+            text=get_text(settings.language, "flow_expired"),
+        )
         return
     draft, meta = stored
     language = meta.get("language", "ru")
@@ -737,6 +766,13 @@ async def handle_conflict_callbacks(
             else:
                 event_id = meta.get("event_id")
                 if not event_id:
+                    events.pop_draft(draft_id)
+                    await telegram_sender.safe_tg_call(
+                        "ui",
+                        f"conflict:missing:{draft_id}",
+                        callback.message.edit_text,
+                        text=get_text(language, "event_missing"),
+                    )
                     return
                 await events.reschedule_event(event_id, draft.starts_at)
                 event = await events.get_event(event_id)
@@ -793,6 +829,13 @@ async def handle_conflict_callbacks(
             else:
                 event_id = meta.get("event_id")
                 if not event_id:
+                    events.pop_draft(draft_id)
+                    await telegram_sender.safe_tg_call(
+                        "ui",
+                        f"conflict:setroom:missing:{draft_id}",
+                        callback.message.edit_text,
+                        text=get_text(language, "event_missing"),
+                    )
                     return
                 await events.change_room(event_id, draft.room)
                 event = await events.get_event(event_id)
@@ -847,6 +890,7 @@ async def handle_conflict_callbacks(
             callback.message.edit_text,
             text=get_text(language, "reminder_cancelled"),
         )
+        return
 
 
 @router.message(CreateEventState.conflict_room)
@@ -855,14 +899,29 @@ async def handle_conflict_room_manual(
     state: FSMContext,
     events: EventsService,
     telegram_sender: TelegramSender,
+    users: UserService,
 ) -> None:
     data = await state.get_data()
     await state.clear()
     draft_id = data.get("draft_id")
     if not draft_id:
+        settings = await users.get(message.from_user.id)
+        await _safe_message(
+            telegram_sender,
+            f"conflict:manual:missing:{message.chat.id}:{message.message_id}",
+            message.answer,
+            text=get_text(settings.language, "flow_expired"),
+        )
         return
     stored = events.get_draft(draft_id)
     if not stored:
+        settings = await users.get(message.from_user.id)
+        await _safe_message(
+            telegram_sender,
+            f"conflict:manual:expired:{message.chat.id}:{message.message_id}",
+            message.answer,
+            text=get_text(settings.language, "flow_expired"),
+        )
         return
     draft, meta = stored
     draft.room = message.text.strip()
@@ -884,6 +943,13 @@ async def handle_conflict_room_manual(
         else:
             event_id = meta.get("event_id")
             if not event_id:
+                events.pop_draft(draft_id)
+                await _safe_message(
+                    telegram_sender,
+                    f"conflict:manual:event-missing:{message.chat.id}:{message.message_id}",
+                    message.answer,
+                    text=get_text(language, "event_missing"),
+                )
                 return
             await events.change_room(event_id, draft.room)
             event = await events.get_event(event_id)
