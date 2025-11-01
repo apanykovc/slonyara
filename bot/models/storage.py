@@ -148,6 +148,49 @@ class ChatSettings:
         )
 
 
+@dataclass(slots=True)
+class UserSettings:
+    """Persistent preferences for an individual user."""
+
+    id: int
+    timezone: Optional[str] = None
+    locale: str = "ru_RU"
+    date_format: str = "%d.%m.%Y"
+    time_format: str = "%H:%M"
+    default_lead_time: int = 900
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "timezone": self.timezone,
+            "locale": self.locale,
+            "date_format": self.date_format,
+            "time_format": self.time_format,
+            "default_lead_time": self.default_lead_time,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "UserSettings":
+        timezone = payload.get("timezone")
+        if timezone:
+            timezone = str(timezone)
+        default_lead_time = payload.get("default_lead_time", 900)
+        try:
+            default_lead_time = int(default_lead_time)
+        except (TypeError, ValueError):
+            default_lead_time = 900
+        if default_lead_time < 0:
+            default_lead_time = 0
+        return cls(
+            id=int(payload.get("id", 0)),
+            timezone=timezone,
+            locale=str(payload.get("locale", "ru_RU")),
+            date_format=str(payload.get("date_format", "%d.%m.%Y")),
+            time_format=str(payload.get("time_format", "%H:%M")),
+            default_lead_time=default_lead_time,
+        )
+
+
 class MeetingStorage:
     """Simple JSON based storage implementation."""
 
@@ -202,6 +245,10 @@ class MeetingStorage:
 
     def _chats(self) -> List[Dict[str, Any]]:
         return self._data.setdefault("chats", [])
+
+    def _user_settings(self) -> Dict[str, Any]:
+        settings = self._data.setdefault("settings", {})
+        return settings.setdefault("users", {})
 
     def list_meetings(self) -> List[Meeting]:
         meetings = [Meeting.from_dict(payload) for payload in self._meetings()]
@@ -489,6 +536,25 @@ class MeetingStorage:
         self._data.setdefault("settings", {})[name] = value
         self._save()
 
+    def get_user_settings(self, user_id: int) -> UserSettings:
+        payload = self._user_settings().get(str(int(user_id)), {})
+        settings = UserSettings.from_dict({"id": user_id, **payload})
+        return self._ensure_user_defaults(settings)
+
+    def save_user_settings(self, settings: UserSettings) -> UserSettings:
+        normalized = self._ensure_user_defaults(settings)
+        self._user_settings()[str(int(normalized.id))] = normalized.to_dict()
+        self._save()
+        return normalized
+
+    def update_user_settings(self, user_id: int, **updates: Any) -> UserSettings:
+        current = self.get_user_settings(user_id)
+        for field_name, value in updates.items():
+            if not hasattr(current, field_name):
+                continue
+            setattr(current, field_name, value)
+        return self.save_user_settings(current)
+
     # ------------------------------------------------------------------
     def _with_timezone(self, dt: datetime) -> datetime:
         if self._timezone is None:
@@ -519,6 +585,17 @@ class MeetingStorage:
             for meeting_id, values in chat.reminder_log.items()
         }
         return chat
+
+    def _ensure_user_defaults(self, settings: UserSettings) -> UserSettings:
+        if not settings.locale:
+            settings.locale = "ru_RU"
+        if not settings.date_format:
+            settings.date_format = "%d.%m.%Y"
+        if not settings.time_format:
+            settings.time_format = "%H:%M"
+        if settings.default_lead_time < 0:
+            settings.default_lead_time = 0
+        return settings
 
     def _normalize_lead_times(self, values: Sequence[int] | Iterable[int]) -> List[int]:
         normalized: list[int] = []
