@@ -21,6 +21,14 @@ Utilities for structured logging across the project.
    > python -m pip install -r requirements.txt
    > ```
 
+   > [!NOTE]
+   > When using **Python 3.13 on Windows**, installing `pydantic-core`
+   > requires native compilation. Ensure both the Rust toolchain and the
+   > *Microsoft C++ Build Tools* (which provide `link.exe`) are installed and
+   > available in `PATH` before running the `pip install` command. If setting
+   > up the build tools is not an option, install Python 3.12 where pre-built
+   > wheels are still distributed.
+
 2. **Configure the bot token and runtime options.**
 
    The project reads configuration values from a `.env` file. An example
