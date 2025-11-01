@@ -372,6 +372,7 @@ def create_router(
             lead_times=default_lead_times or reminder.default_lead_times,
             admin_ids=[message.from_user.id],
         )
+        await reminder.send_due_reminders()
         await message.answer(
             "Чат зарегистрирован. Текущие интервалы напоминаний: {intervals}.".format(
                 intervals=format_lead_times(chat)
@@ -402,6 +403,7 @@ def create_router(
         if not updated:
             await message.answer("Не удалось обновить интервалы напоминаний.")
             return
+        await reminder.send_due_reminders()
         await message.answer(
             "Интервалы напоминаний обновлены: {intervals}.".format(
                 intervals=format_lead_times(updated)
