@@ -6,12 +6,24 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Literal, cast
 from uuid import uuid4
 
 from zoneinfo import ZoneInfo
 
 _logger = logging.getLogger(__name__)
+
+RoleName = Literal["admin", "user"]
+_VALID_ROLES: Tuple[RoleName, ...] = ("admin", "user")
+
+
+def _normalize_role(value: Any) -> RoleName | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in _VALID_ROLES:
+        return cast(RoleName, text)
+    return None
 
 
 @dataclass(slots=True)
@@ -70,6 +82,7 @@ class ChatSettings:
     title: str = ""
     lead_times: List[int] = field(default_factory=list)
     admin_ids: List[int] = field(default_factory=list)
+    roles: Dict[int, RoleName] = field(default_factory=dict)
     reminder_log: Dict[str, List[int]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -78,6 +91,7 @@ class ChatSettings:
             "title": self.title,
             "lead_times": self.lead_times,
             "admin_ids": self.admin_ids,
+            "roles": {str(user_id): role for user_id, role in self.roles.items()},
             "reminder_log": self.reminder_log,
         }
 
@@ -98,6 +112,23 @@ class ChatSettings:
                 admin_ids.append(int(value))
             except (TypeError, ValueError):
                 continue
+        roles_payload = payload.get("roles", {}) or {}
+        roles: dict[int, RoleName] = {}
+        for raw_user_id, raw_role in roles_payload.items():
+            try:
+                user_id = int(raw_user_id)
+            except (TypeError, ValueError):
+                continue
+            role = _normalize_role(raw_role)
+            if role is None:
+                continue
+            roles[user_id] = role
+        for admin_id in admin_ids:
+            roles.setdefault(admin_id, "admin")
+        for user_id, role in list(roles.items()):
+            if role == "admin" and user_id not in admin_ids:
+                admin_ids.append(user_id)
+        admin_ids = list(dict.fromkeys(admin_ids))
         reminder_log: dict[str, list[int]] = {}
         for key, values in (payload.get("reminder_log", {}) or {}).items():
             normalized: list[int] = []
@@ -112,6 +143,7 @@ class ChatSettings:
             title=str(payload.get("title", "")),
             lead_times=lead_times,
             admin_ids=admin_ids,
+            roles=roles,
             reminder_log=reminder_log,
         )
 
@@ -318,6 +350,33 @@ class MeetingStorage:
     def is_chat_registered(self, chat_id: int) -> bool:
         return self.get_chat(chat_id) is not None
 
+    def get_chat_role(self, chat_id: int, user_id: int) -> Optional[RoleName]:
+        chat = self.get_chat(chat_id)
+        if not chat:
+            return None
+        return chat.roles.get(int(user_id))
+
+    def has_chat_role(self, chat_id: int, user_id: int, roles: Iterable[str]) -> bool:
+        allowed = {role.strip().lower() for role in roles if role}
+        role = self.get_chat_role(chat_id, user_id)
+        return role in allowed
+
+    def list_user_chats(
+        self, user_id: int, *, roles: Iterable[str] | None = None
+    ) -> List[ChatSettings]:
+        allowed = {role.strip().lower() for role in roles or [] if role}
+        result: list[ChatSettings] = []
+        for payload in self._chats():
+            chat = self._ensure_chat_defaults(ChatSettings.from_dict(payload))
+            role = chat.roles.get(int(user_id))
+            if roles is None:
+                if role:
+                    result.append(chat)
+            else:
+                if role in allowed:
+                    result.append(chat)
+        return result
+
     def register_chat(
         self,
         chat_id: int,
@@ -346,10 +405,12 @@ class MeetingStorage:
                     payload["title"] = title
                 payload.setdefault("lead_times", normalized_leads)
                 payload.setdefault("admin_ids", [])
+                roles_map = payload.setdefault("roles", {})
                 payload.setdefault("reminder_log", {})
                 for admin_id in admins:
                     if admin_id not in payload["admin_ids"]:
                         payload["admin_ids"].append(admin_id)
+                    roles_map[str(admin_id)] = "admin"
                 payload["lead_times"] = normalized_leads
                 self._save()
                 return self._ensure_chat_defaults(ChatSettings.from_dict(payload))
@@ -359,6 +420,7 @@ class MeetingStorage:
             title=title or "",
             lead_times=list(normalized_leads),
             admin_ids=admins,
+            roles={admin_id: "admin" for admin_id in admins},
         )
         self._chats().append(chat.to_dict())
         self._save()
@@ -377,30 +439,46 @@ class MeetingStorage:
         return None
 
     def add_chat_admin(self, chat_id: int, user_id: int) -> Optional[ChatSettings]:
-        for payload in self._chats():
-            if int(payload.get("id")) == chat_id:
-                admins = payload.setdefault("admin_ids", [])
-                if user_id not in admins:
-                    admins.append(user_id)
-                    self._save()
-                return self._ensure_chat_defaults(ChatSettings.from_dict(payload))
-        return None
+        return self.set_chat_role(chat_id, user_id, "admin")
 
     def remove_chat_admin(self, chat_id: int, user_id: int) -> Optional[ChatSettings]:
+        return self.set_chat_role(chat_id, user_id, "user")
+
+    def set_chat_role(self, chat_id: int, user_id: int, role: str) -> Optional[ChatSettings]:
+        normalized_role = _normalize_role(role)
+        if normalized_role is None:
+            return None
         for payload in self._chats():
-            if int(payload.get("id")) == chat_id:
-                admins = payload.setdefault("admin_ids", [])
+            if int(payload.get("id")) != chat_id:
+                continue
+            roles_map = payload.setdefault("roles", {})
+            roles_map[str(int(user_id))] = normalized_role
+            admins = payload.setdefault("admin_ids", [])
+            if normalized_role == "admin":
+                if user_id not in admins:
+                    admins.append(user_id)
+            else:
                 if user_id in admins:
                     admins.remove(user_id)
-                    self._save()
-                return self._ensure_chat_defaults(ChatSettings.from_dict(payload))
+            self._save()
+            return self._ensure_chat_defaults(ChatSettings.from_dict(payload))
+        return None
+
+    def clear_chat_role(self, chat_id: int, user_id: int) -> Optional[ChatSettings]:
+        for payload in self._chats():
+            if int(payload.get("id")) != chat_id:
+                continue
+            roles_map = payload.setdefault("roles", {})
+            roles_map.pop(str(int(user_id)), None)
+            admins = payload.setdefault("admin_ids", [])
+            if user_id in admins:
+                admins.remove(user_id)
+            self._save()
+            return self._ensure_chat_defaults(ChatSettings.from_dict(payload))
         return None
 
     def is_chat_admin(self, chat_id: int, user_id: int) -> bool:
-        chat = self.get_chat(chat_id)
-        if not chat:
-            return False
-        return user_id in chat.admin_ids
+        return self.get_chat_role(chat_id, user_id) == "admin"
 
     # ------------------------------------------------------------------
     # settings helpers
@@ -424,7 +502,18 @@ class MeetingStorage:
             default = self._default_lead_times or (1800, 600, 0)
             chat.lead_times = list(default)
         chat.lead_times = self._normalize_lead_times(chat.lead_times)
-        chat.admin_ids = list(dict.fromkeys(chat.admin_ids))
+        normalized_roles: dict[int, RoleName] = {}
+        for user_id, role in chat.roles.items():
+            try:
+                normalized_user = int(user_id)
+            except (TypeError, ValueError):
+                continue
+            normalized_role = _normalize_role(role)
+            if normalized_role is None:
+                continue
+            normalized_roles[normalized_user] = normalized_role
+        chat.roles = normalized_roles
+        chat.admin_ids = [user_id for user_id, role in chat.roles.items() if role == "admin"]
         chat.reminder_log = {
             meeting_id: self._normalize_lead_times(values)
             for meeting_id, values in chat.reminder_log.items()

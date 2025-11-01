@@ -24,6 +24,7 @@ class MeetingCommand:
     room: Optional[str] = None
     new_request_number: Optional[str] = None
     minutes_delta: Optional[int] = None
+    chat_id: Optional[int] = None
 
 
 def parse_meeting_command(text: str, now: datetime) -> Optional[MeetingCommand]:
@@ -33,25 +34,53 @@ def parse_meeting_command(text: str, now: datetime) -> Optional[MeetingCommand]:
     if not text:
         return None
 
+    chat_id, remainder = _extract_chat_prefix(text)
+    text = remainder.strip()
+    if not text:
+        return None
+
     lower = text.lower()
 
     command = _parse_create(text, now)
     if command:
+        command.chat_id = chat_id
         return command
 
     command = _parse_cancel(lower)
     if command:
+        command.chat_id = chat_id
         return command
 
     command = _parse_snooze(lower)
     if command:
+        command.chat_id = chat_id
         return command
 
     command = _parse_update(text, lower, now)
     if command:
+        command.chat_id = chat_id
         return command
 
     return None
+
+
+def _extract_chat_prefix(text: str) -> Tuple[Optional[int], str]:
+    parts = text.split(maxsplit=1)
+    if not parts:
+        return None, text
+    token = parts[0]
+    if token.lower().startswith("chat:"):
+        candidate = token[5:]
+    elif token.startswith("#"):
+        candidate = token[1:]
+    else:
+        return None, text
+    try:
+        chat_id = int(candidate)
+    except ValueError:
+        return None, text
+    remainder = parts[1] if len(parts) > 1 else ""
+    return chat_id, remainder
 
 
 def _parse_create(text: str, now: datetime) -> Optional[MeetingCommand]:

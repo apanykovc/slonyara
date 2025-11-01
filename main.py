@@ -41,7 +41,7 @@ async def main() -> None:
     dispatcher.startup.register(reminder.start)
     dispatcher.shutdown.register(reminder.stop)
 
-    user_handlers.register(dispatcher, storage)
+    user_handlers.register(dispatcher, storage, reminder)
     admin_handlers.register(
         dispatcher,
         storage,
