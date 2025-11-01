@@ -34,6 +34,12 @@ class ReminderService:
         self._timezone = timezone
         self._task: Optional[asyncio.Task] = None
 
+    @property
+    def timezone(self) -> ZoneInfo:
+        """Return service timezone."""
+
+        return self._timezone
+
     async def start(self) -> None:
         if self._task is None:
             self._task = asyncio.create_task(self._run(), name="reminder-service")
@@ -76,9 +82,19 @@ class ReminderService:
 
     @staticmethod
     def _render_message(meeting: Meeting) -> str:
-        scheduled_at = meeting.scheduled_at.strftime("%Y-%m-%d %H:%M")
-        return (
-            f"\u23f0 Напоминание о встрече \"{meeting.title}\"\n"
-            f"Когда: {scheduled_at}\n"
-            f"Участники: {', '.join(str(pid) for pid in meeting.participants)}"
-        )
+        scheduled_at = meeting.scheduled_at.strftime("%d.%m.%Y %H:%M")
+        title_parts = []
+        if meeting.meeting_type:
+            title_parts.append(meeting.meeting_type)
+        elif meeting.title:
+            title_parts.append(meeting.title)
+        if meeting.room:
+            title_parts.append(f"Переговорная {meeting.room}")
+        header = " · ".join(title_parts) if title_parts else meeting.title or "Встреча"
+        lines = [f"⏰ Напоминание о встрече \"{header}\""]
+        lines.append(f"Когда: {scheduled_at}")
+        if meeting.request_number:
+            lines.append(f"Заявка: {meeting.request_number}")
+        participants = ", ".join(str(pid) for pid in meeting.participants)
+        lines.append(f"Участники: {participants}")
+        return "\n".join(lines)

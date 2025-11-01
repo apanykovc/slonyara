@@ -39,12 +39,18 @@ def create_router(storage: MeetingStorage) -> Router:
 
         lines = ["Ваши ближайшие встречи:"]
         for meeting in meetings:
-            lines.append(
-                "• {title} — {when}".format(
-                    title=meeting.title,
-                    when=meeting.scheduled_at.strftime("%Y-%m-%d %H:%M"),
-                )
-            )
+            when = meeting.scheduled_at.strftime("%d.%m.%Y %H:%M")
+            parts: list[str] = []
+            if meeting.meeting_type:
+                parts.append(meeting.meeting_type)
+            elif meeting.title:
+                parts.append(meeting.title)
+            if meeting.room:
+                parts.append(f"Переговорная {meeting.room}")
+            if meeting.request_number:
+                parts.append(f"Заявка {meeting.request_number}")
+            title = " — ".join(parts) if parts else meeting.title or "Встреча"
+            lines.append(f"• {title} ({when})")
         await message.answer("\n".join(lines))
 
     return router

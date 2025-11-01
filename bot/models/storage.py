@@ -25,6 +25,9 @@ class Meeting:
     participants: List[int] = field(default_factory=list)
     description: Optional[str] = None
     reminder_sent: bool = False
+    meeting_type: Optional[str] = None
+    room: Optional[str] = None
+    request_number: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -35,6 +38,9 @@ class Meeting:
             "participants": self.participants,
             "description": self.description,
             "reminder_sent": self.reminder_sent,
+            "meeting_type": self.meeting_type,
+            "room": self.room,
+            "request_number": self.request_number,
         }
 
     @classmethod
@@ -47,6 +53,9 @@ class Meeting:
             participants=[int(pid) for pid in payload.get("participants", [])],
             description=payload.get("description"),
             reminder_sent=bool(payload.get("reminder_sent", False)),
+            meeting_type=payload.get("meeting_type"),
+            room=payload.get("room"),
+            request_number=payload.get("request_number"),
         )
 
 
@@ -58,6 +67,12 @@ class MeetingStorage:
         self._timezone = timezone
         self._data: Dict[str, Any] = {"meetings": [], "settings": {}}
         self._load()
+
+    @property
+    def timezone(self) -> ZoneInfo | None:
+        """Return configured timezone, if any."""
+
+        return self._timezone
 
     # ------------------------------------------------------------------
     # persistence helpers
@@ -100,6 +115,12 @@ class MeetingStorage:
                 return Meeting.from_dict(payload)
         return None
 
+    def find_meeting_by_request_number(self, request_number: str) -> Optional[Meeting]:
+        for payload in self._meetings():
+            if payload.get("request_number") == request_number:
+                return Meeting.from_dict(payload)
+        return None
+
     def create_meeting(
         self,
         title: str,
@@ -107,6 +128,10 @@ class MeetingStorage:
         organizer_id: int,
         participants: Optional[Iterable[int]] = None,
         description: Optional[str] = None,
+        *,
+        meeting_type: Optional[str] = None,
+        room: Optional[str] = None,
+        request_number: Optional[str] = None,
     ) -> Meeting:
         if participants is None:
             participants = [organizer_id]
@@ -117,6 +142,9 @@ class MeetingStorage:
             organizer_id=organizer_id,
             participants=list(dict.fromkeys(int(pid) for pid in participants)),
             description=description,
+            meeting_type=meeting_type,
+            room=room,
+            request_number=request_number,
         )
         self._meetings().append(meeting.to_dict())
         self._save()
@@ -140,6 +168,35 @@ class MeetingStorage:
                 self._save()
                 return True
         return False
+
+    def update_meeting(
+        self,
+        meeting_id: str,
+        *,
+        title: Optional[str] = None,
+        scheduled_at: Optional[datetime] = None,
+        meeting_type: Optional[str] = None,
+        room: Optional[str] = None,
+        request_number: Optional[str] = None,
+    ) -> Optional[Meeting]:
+        if scheduled_at is not None:
+            scheduled_at = self._with_timezone(scheduled_at)
+        for payload in self._meetings():
+            if payload.get("id") == meeting_id:
+                if title is not None:
+                    payload["title"] = title
+                if scheduled_at is not None:
+                    payload["scheduled_at"] = scheduled_at.isoformat()
+                    payload["reminder_sent"] = False
+                if meeting_type is not None:
+                    payload["meeting_type"] = meeting_type
+                if room is not None:
+                    payload["room"] = room
+                if request_number is not None:
+                    payload["request_number"] = request_number
+                self._save()
+                return Meeting.from_dict(payload)
+        return None
 
     def mark_reminder_sent(self, meeting_id: str) -> None:
         for payload in self._meetings():
