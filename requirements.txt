@@ -1,3 +1,10 @@
 aiogram==3.4.1
 python-dotenv==1.0.1
 tzdata==2024.1
+
+# Explicitly pin pydantic and its core runtime to versions that provide
+# pre-built wheels for Python 3.13 on Windows so that Rust is not required
+# during installation.  Without these pins pip may attempt to build
+# pydantic-core from source which fails on systems without a Rust toolchain.
+pydantic==2.8.2
+pydantic-core==2.20.1
