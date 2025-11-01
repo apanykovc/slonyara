@@ -25,11 +25,15 @@ async def main() -> None:
     bot = Bot(token=config.bot.token, parse_mode=parse_mode)
     dispatcher = Dispatcher()
 
-    storage = MeetingStorage(config.storage_path, timezone=config.timezone)
+    storage = MeetingStorage(
+        config.storage_path,
+        timezone=config.timezone,
+        default_lead_times=config.reminder.lead_times,
+    )
     reminder = ReminderService(
         bot=bot,
         storage=storage,
-        lead_time=config.reminder.lead_time,
+        lead_times=config.reminder.lead_times,
         check_interval=config.reminder.check_interval,
         timezone=config.timezone,
     )
@@ -38,7 +42,14 @@ async def main() -> None:
     dispatcher.shutdown.register(reminder.stop)
 
     user_handlers.register(dispatcher, storage)
-    admin_handlers.register(dispatcher, storage, reminder, config.bot.admins)
+    admin_handlers.register(
+        dispatcher,
+        storage,
+        reminder,
+        config.bot.admins,
+        config.bot.admin_usernames,
+        config.reminder.lead_times,
+    )
 
     await dispatcher.start_polling(bot)
 

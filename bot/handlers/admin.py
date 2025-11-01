@@ -7,7 +7,7 @@ from typing import Optional
 from aiogram import Dispatcher, Router, types
 from aiogram.filters import Command
 
-from bot.models.storage import Meeting, MeetingStorage
+from bot.models.storage import ChatSettings, Meeting, MeetingStorage
 from bot.services.reminder import ReminderService
 from bot.utils.meeting_parser import MeetingCommand, parse_meeting_command
 
@@ -16,15 +16,34 @@ def create_router(
     storage: MeetingStorage,
     reminder: ReminderService,
     admin_ids: tuple[int, ...],
+    admin_usernames: tuple[str, ...],
+    default_lead_times: tuple[int, ...],
 ) -> Router:
     router = Router(name="admin-handlers")
 
     def is_admin(message: types.Message) -> bool:
-        return bool(message.from_user and message.from_user.id in admin_ids)
+        if not message.from_user:
+            return False
+        user_id = message.from_user.id
+        username = (message.from_user.username or "").lower()
+        if user_id in admin_ids or username in admin_usernames:
+            return True
+        if message.chat:
+            return storage.is_chat_admin(message.chat.id, user_id)
+        return False
 
     async def ensure_admin(message: types.Message) -> bool:
         if not is_admin(message):
             await message.answer("Эта команда доступна только администраторам.")
+            return False
+        if (
+            message.chat
+            and message.chat.type != "private"
+            and not storage.is_chat_registered(message.chat.id)
+        ):
+            await message.answer(
+                "Чат не зарегистрирован. Используйте /register_chat, чтобы настроить напоминания."
+            )
             return False
         return True
 
@@ -60,6 +79,34 @@ def create_router(
         existing = storage.find_meeting_by_request_number(number)
         return not existing or existing.id == exclude
 
+    def format_lead_times(settings: ChatSettings) -> str:
+        values = settings.lead_times
+        if not values:
+            return "не настроены"
+        return ", ".join(ReminderService._format_lead_time(value) for value in values)
+
+    def parse_duration(token: str) -> Optional[int]:
+        token = token.strip().lower()
+        if not token:
+            return None
+        multiplier = 60
+        if token.endswith("h"):
+            multiplier = 3600
+            token = token[:-1]
+        elif token.endswith("m"):
+            multiplier = 60
+            token = token[:-1]
+        elif token.endswith("s"):
+            multiplier = 1
+            token = token[:-1]
+        try:
+            value = int(token)
+        except ValueError:
+            return None
+        if value < 0:
+            return None
+        return value * multiplier
+
     def apply_partial_datetime(
         original: datetime,
         command: MeetingCommand,
@@ -93,7 +140,9 @@ def create_router(
             changed = True
         return updated, changed
 
-    async def execute_command(message: types.Message, command: MeetingCommand, now: datetime) -> None:
+    async def execute_command(
+        message: types.Message, command: MeetingCommand, now: datetime
+    ) -> None:
         if command.action == "create":
             if message.from_user is None:
                 await message.answer("Не удалось определить пользователя.")
@@ -104,6 +153,10 @@ def create_router(
             if command.request_number and not ensure_unique_request(command.request_number):
                 await message.answer("Встреча с таким номером заявки уже существует.")
                 return
+            chat_id = message.chat.id if message.chat else None
+            if chat_id is None:
+                await message.answer("Создавать встречи можно только в групповых чатах.")
+                return
             meeting_type = command.meeting_type or "Встреча"
             title = compose_title(meeting_type, command.room, meeting_type)
             meeting = storage.create_meeting(
@@ -113,6 +166,7 @@ def create_router(
                 meeting_type=command.meeting_type,
                 room=command.room,
                 request_number=command.request_number,
+                chat_id=chat_id,
             )
             await message.answer("Встреча создана.\n" + render_summary(meeting))
             return
@@ -124,6 +178,9 @@ def create_router(
             meeting = storage.find_meeting_by_request_number(command.request_number)
             if not meeting:
                 await message.answer("Встреча с такой заявкой не найдена.")
+                return
+            if message.chat and meeting.chat_id and meeting.chat_id != message.chat.id:
+                await message.answer("Эта встреча принадлежит другому чату.")
                 return
             storage.cancel_meeting(meeting.id)
             await message.answer("Встреча отменена.\n" + render_summary(meeting))
@@ -142,6 +199,9 @@ def create_router(
             if not meeting:
                 await message.answer("Не удалось найти встречу для переноса.")
                 return
+            if message.chat and meeting.chat_id and meeting.chat_id != message.chat.id:
+                await message.answer("Эта встреча принадлежит другому чату.")
+                return
             new_time = meeting.scheduled_at + timedelta(minutes=minutes)
             updated = storage.update_meeting(meeting.id, scheduled_at=new_time)
             if not updated:
@@ -158,6 +218,9 @@ def create_router(
             meeting = storage.find_meeting_by_request_number(command.request_number)
             if not meeting:
                 await message.answer("Встреча с такой заявкой не найдена.")
+                return
+            if message.chat and meeting.chat_id and meeting.chat_id != message.chat.id:
+                await message.answer("Эта встреча принадлежит другому чату.")
                 return
 
             schedule_target = meeting.scheduled_at
@@ -281,6 +344,120 @@ def create_router(
         except ValueError as exc:
             await message.answer(str(exc))
 
+    @router.message(Command("register_chat"))
+    async def handle_register_chat(message: types.Message) -> None:
+        if not message.chat:
+            await message.answer("Команда доступна только в чате.")
+            return
+        if not message.from_user:
+            await message.answer("Не удалось определить пользователя.")
+            return
+        if message.from_user.id not in admin_ids and (
+            (message.from_user.username or "").lower() not in admin_usernames
+        ):
+            await message.answer("Команда доступна только глобальным администраторам.")
+            return
+        chat = storage.register_chat(
+            message.chat.id,
+            message.chat.title or message.chat.full_name,
+            lead_times=default_lead_times or reminder.default_lead_times,
+            admin_ids=[message.from_user.id],
+        )
+        await message.answer(
+            "Чат зарегистрирован. Текущие интервалы напоминаний: {intervals}.".format(
+                intervals=format_lead_times(chat)
+            )
+        )
+
+    @router.message(Command("set_lead_times"))
+    async def handle_set_lead_times(message: types.Message) -> None:
+        if not await ensure_admin(message):
+            return
+        if not message.chat:
+            await message.answer("Команда доступна только в чате.")
+            return
+        args = message.text.split()[1:] if message.text else []
+        if not args:
+            await message.answer(
+                "Использование: /set_lead_times <минуты...>\nПример: /set_lead_times 30 10 0"
+            )
+            return
+        lead_times: list[int] = []
+        for token in args:
+            duration = parse_duration(token)
+            if duration is None:
+                await message.answer(f"Неверное значение: {token}")
+                return
+            lead_times.append(duration)
+        updated = storage.set_chat_lead_times(message.chat.id, lead_times)
+        if not updated:
+            await message.answer("Не удалось обновить интервалы напоминаний.")
+            return
+        await message.answer(
+            "Интервалы напоминаний обновлены: {intervals}.".format(
+                intervals=format_lead_times(updated)
+            )
+        )
+
+    @router.message(Command("chat_settings"))
+    async def handle_chat_settings(message: types.Message) -> None:
+        if not await ensure_admin(message):
+            return
+        if not message.chat:
+            await message.answer("Команда доступна только в чате.")
+            return
+        chat = storage.get_chat(message.chat.id)
+        if not chat:
+            await message.answer("Чат не зарегистрирован.")
+            return
+        admins = ", ".join(str(admin) for admin in chat.admin_ids) or "не назначены"
+        await message.answer(
+            "Настройки чата:\n"
+            f"ID: {chat.id}\n"
+            f"Интервалы: {format_lead_times(chat)}\n"
+            f"Администраторы: {admins}"
+        )
+
+    @router.message(Command("add_chat_admin"))
+    async def handle_add_chat_admin(message: types.Message) -> None:
+        if not await ensure_admin(message):
+            return
+        if not message.chat:
+            await message.answer("Команда доступна только в чате.")
+            return
+        if not message.reply_to_message or not message.reply_to_message.from_user:
+            await message.answer("Ответьте на сообщение пользователя, чтобы выдать права администратора.")
+            return
+        added = storage.add_chat_admin(message.chat.id, message.reply_to_message.from_user.id)
+        if not added:
+            await message.answer("Чат не зарегистрирован.")
+            return
+        await message.answer(
+            "Пользователь {user} добавлен в администраторы.".format(
+                user=message.reply_to_message.from_user.full_name
+            )
+        )
+
+    @router.message(Command("remove_chat_admin"))
+    async def handle_remove_chat_admin(message: types.Message) -> None:
+        if not await ensure_admin(message):
+            return
+        if not message.chat:
+            await message.answer("Команда доступна только в чате.")
+            return
+        if not message.reply_to_message or not message.reply_to_message.from_user:
+            await message.answer("Ответьте на сообщение пользователя, чтобы убрать его из администраторов.")
+            return
+        removed = storage.remove_chat_admin(message.chat.id, message.reply_to_message.from_user.id)
+        if not removed:
+            await message.answer("Чат не зарегистрирован.")
+            return
+        await message.answer(
+            "Пользователь {user} удалён из списка администраторов.".format(
+                user=message.reply_to_message.from_user.full_name
+            )
+        )
+
     return router
 
 
@@ -289,5 +466,9 @@ def register(
     storage: MeetingStorage,
     reminder: ReminderService,
     admin_ids: tuple[int, ...],
+    admin_usernames: tuple[str, ...],
+    default_lead_times: tuple[int, ...],
 ) -> None:
-    dispatcher.include_router(create_router(storage, reminder, admin_ids))
+    dispatcher.include_router(
+        create_router(storage, reminder, admin_ids, admin_usernames, default_lead_times)
+    )
