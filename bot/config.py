@@ -15,7 +15,7 @@ class ReminderConfig:
     """Configuration for reminder service behaviour."""
 
     check_interval: int = 60
-    lead_time: int = 600
+    lead_times: Tuple[int, ...] = field(default_factory=tuple)
 
 
 @dataclass(slots=True)
@@ -24,6 +24,7 @@ class BotSettings:
 
     token: str
     admins: Tuple[int, ...] = field(default_factory=tuple)
+    admin_usernames: Tuple[str, ...] = field(default_factory=tuple)
     default_role: str = "user"
     admin_role: str = "admin"
     parse_mode: str = "HTML"
@@ -54,6 +55,56 @@ def _parse_admins(raw: str | None) -> Tuple[int, ...]:
     return tuple(admins)
 
 
+def _parse_admin_usernames(raw: str | None, *, default: Tuple[str, ...]) -> Tuple[str, ...]:
+    if raw is None:
+        return tuple(default)
+    usernames: list[str] = []
+    for item in raw.replace(";", ",").split(","):
+        item = item.strip().lstrip("@")
+        if not item:
+            continue
+        usernames.append(item.lower())
+    if not usernames:
+        return tuple(default)
+    return tuple(dict.fromkeys(usernames))
+
+
+def _parse_lead_times(raw: str | None, *, default: Tuple[int, ...]) -> Tuple[int, ...]:
+    if raw is None or not raw.strip():
+        return default
+
+    result: list[int] = []
+    for token in raw.replace(";", ",").split(","):
+        token = token.strip().lower()
+        if not token:
+            continue
+        multiplier = 60
+        if token.endswith("h"):
+            multiplier = 3600
+            token = token[:-1]
+        elif token.endswith("m"):
+            multiplier = 60
+            token = token[:-1]
+        elif token.endswith("s"):
+            multiplier = 1
+            token = token[:-1]
+        try:
+            value = int(token)
+        except ValueError:
+            logging.getLogger(__name__).warning("Ignoring invalid reminder lead time: %s", token)
+            continue
+        if value < 0:
+            logging.getLogger(__name__).warning("Lead time cannot be negative: %s", token)
+            continue
+        result.append(value * multiplier)
+
+    if not result:
+        return default
+
+    unique_sorted = sorted(dict.fromkeys(result))
+    return tuple(unique_sorted)
+
+
 def _load_timezone(name: str | None) -> ZoneInfo:
     if not name:
         name = "UTC"
@@ -72,16 +123,21 @@ def load_config() -> Config:
         raise RuntimeError("BOT_TOKEN environment variable must be set")
 
     admins = _parse_admins(os.getenv("BOT_ADMINS"))
+    admin_usernames = _parse_admin_usernames(
+        os.getenv("BOT_ADMIN_USERNAMES"), default=("panykovc",)
+    )
     storage_path = Path(os.getenv("BOT_STORAGE_PATH", "data/meetings.json")).expanduser()
     reminder_check_interval = int(os.getenv("BOT_REMINDER_INTERVAL", "60"))
-    reminder_lead_time = int(os.getenv("BOT_REMINDER_LEAD", "600"))
+    reminder_lead_times = _parse_lead_times(
+        os.getenv("BOT_REMINDER_LEAD"), default=(1800, 600, 0)
+    )
     timezone = _load_timezone(os.getenv("BOT_TIMEZONE"))
 
     storage_path.parent.mkdir(parents=True, exist_ok=True)
 
     return Config(
-        bot=BotSettings(token=token, admins=admins),
-        reminder=ReminderConfig(check_interval=reminder_check_interval, lead_time=reminder_lead_time),
+        bot=BotSettings(token=token, admins=admins, admin_usernames=admin_usernames),
+        reminder=ReminderConfig(check_interval=reminder_check_interval, lead_times=reminder_lead_times),
         storage_path=storage_path,
         timezone=timezone,
     )
