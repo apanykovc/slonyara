@@ -2,13 +2,16 @@ aiogram==3.4.1
 python-dotenv==1.0.1
 tzdata==2024.1
 
-# `aiogram` 3.4.1 constrains `pydantic` to versions `<2.6`.  As of Python
-# 3.13 this range no longer ships pre-built Windows wheels for
-# `pydantic-core`, so `pip` will attempt to compile the Rust extension.
-# That requires both the Rust toolchain (cargo) **and** the Microsoft
-# Visual C++ build tools with the MSVC compiler and a Windows SDK so that
-# `cl.exe`, `link.exe` and headers like `io.h` are available.  Ensure the
-# toolchains are installed and on `PATH` before installing dependencies on
-# Windows, or use Python 3.12 where wheels are still published.
+# `aiogram` 3.4.1 constrains `pydantic` to versions `<2.6`.  On Python 3.13
+# there are no pre-built Windows wheels for `pydantic-core`, so `pip`
+# compiles the Rust extension.  Make sure both toolchains are ready *before*
+# installing dependencies:
+#   • Rust toolchain (cargo) from https://rustup.rs/.
+#   • Microsoft C++ Build Tools / Visual Studio "Desktop development with C++"
+#     workload, with MSVC v143 (or newer), a Windows 10/11 SDK, and optionally
+#     the C++ CMake tools so `link.exe`, `cl.exe`, and headers like `io.h` are
+#     on `PATH`.
+# If installing the Microsoft toolchain is not possible, use Python 3.12 where
+# pre-built wheels are still published.
 pydantic==2.5.3
 pydantic-core==2.14.6
