@@ -2,19 +2,35 @@
 
 Utilities for structured logging across the project.
 
-## Logging
+## Quick start
 
-Use the helpers in `slonyara.logging_config` to configure logging once at
-application start:
+1. **Create a virtual environment and install dependencies.**
 
-```python
-from slonyara.logging_config import setup_logging, get_category_logger
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   make install
+   ```
 
-setup_logging(log_file="logs/app.log")
-logger = get_category_logger("meeting_created")
-logger.info("Scheduled a new meeting", extra={"meeting_id": 42})
-```
+2. **Configure the bot token and runtime options.**
 
-Console output is colourised by category, while the file handler stores
-JSON lines that can be ingested by log processors. Supported categories
-are `meeting_created`, `reminder_sent`, and `error`.
+   The project reads configuration values from a `.env` file. An example
+   file is already provided with a development token, default storage
+   location and reminder timing.
+
+   ```bash
+   cat .env
+   ```
+
+   Update the values if necessary, or replace them with your production
+   credentials before deployment.
+
+3. **Launch the bot.**
+
+   ```bash
+   make run
+   ```
+
+   The command loads the environment variables from `.env`, initialises
+   the meeting storage and reminder services, and starts polling updates
+   from Telegram.
