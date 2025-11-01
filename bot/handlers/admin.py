@@ -29,7 +29,7 @@ def create_router(
         if user_id in admin_ids or username in admin_usernames:
             return True
         if message.chat:
-            return storage.is_chat_admin(message.chat.id, user_id)
+            return storage.has_chat_role(message.chat.id, user_id, ("admin",))
         return False
 
     async def ensure_admin(message: types.Message) -> bool:
@@ -153,9 +153,15 @@ def create_router(
             if command.request_number and not ensure_unique_request(command.request_number):
                 await message.answer("Встреча с таким номером заявки уже существует.")
                 return
-            chat_id = message.chat.id if message.chat else None
+            chat_id = message.chat.id if message.chat else command.chat_id
+            if command.chat_id and message.chat and command.chat_id != message.chat.id:
+                await message.answer("Укажите корректный чат для создания встречи.")
+                return
             if chat_id is None:
-                await message.answer("Создавать встречи можно только в групповых чатах.")
+                await message.answer("Создавать встречи можно только в зарегистрированных чатах.")
+                return
+            if not storage.is_chat_registered(chat_id):
+                await message.answer("Укажите зарегистрированный чат для создания встречи.")
                 return
             meeting_type = command.meeting_type or "Встреча"
             title = compose_title(meeting_type, command.room, meeting_type)
@@ -179,7 +185,8 @@ def create_router(
             if not meeting:
                 await message.answer("Встреча с такой заявкой не найдена.")
                 return
-            if message.chat and meeting.chat_id and meeting.chat_id != message.chat.id:
+            target_chat = command.chat_id or (message.chat.id if message.chat else None)
+            if target_chat and meeting.chat_id and meeting.chat_id != target_chat:
                 await message.answer("Эта встреча принадлежит другому чату.")
                 return
             storage.cancel_meeting(meeting.id)
@@ -199,7 +206,8 @@ def create_router(
             if not meeting:
                 await message.answer("Не удалось найти встречу для переноса.")
                 return
-            if message.chat and meeting.chat_id and meeting.chat_id != message.chat.id:
+            target_chat = command.chat_id or (message.chat.id if message.chat else None)
+            if target_chat and meeting.chat_id and meeting.chat_id != target_chat:
                 await message.answer("Эта встреча принадлежит другому чату.")
                 return
             new_time = meeting.scheduled_at + timedelta(minutes=minutes)
@@ -219,7 +227,8 @@ def create_router(
             if not meeting:
                 await message.answer("Встреча с такой заявкой не найдена.")
                 return
-            if message.chat and meeting.chat_id and meeting.chat_id != message.chat.id:
+            target_chat = command.chat_id or (message.chat.id if message.chat else None)
+            if target_chat and meeting.chat_id and meeting.chat_id != target_chat:
                 await message.answer("Эта встреча принадлежит другому чату.")
                 return
 
