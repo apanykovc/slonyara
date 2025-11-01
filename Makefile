@@ -5,4 +5,4 @@ install:
 	python -m pip install -r requirements.txt
 
 run:
-	bash -c 'set -a && source .env && python main.py'
+	bash -c 'set -a && source .env && python -m main'

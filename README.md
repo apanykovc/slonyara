@@ -34,3 +34,16 @@ Utilities for structured logging across the project.
    The command loads the environment variables from `.env`, initialises
    the meeting storage and reminder services, and starts polling updates
    from Telegram.
+
+   If you prefer to run the application directly with Python, use the
+   module form of the command:
+
+   ```bash
+   python -m main
+   ```
+
+   On some platforms (especially Windows), running `python -m main.py`
+   raises an error similar to: `ModuleNotFoundError: __path__ attribute
+   not found on 'main' while trying to find 'main.py'`. Dropping the
+   `.py` suffix is enough to resolve the problem because the `-m` flag
+   expects a module name (`main`) rather than a file name (`main.py`).
