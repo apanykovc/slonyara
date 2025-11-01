@@ -12,6 +12,15 @@ Utilities for structured logging across the project.
    make install
    ```
 
+   > [!TIP]
+   > Windows environments often lack GNU Make. If `make install` is not
+   > available, run the equivalent pip command instead:
+   >
+   > ```powershell
+   > python -m pip install --upgrade pip
+   > python -m pip install -r requirements.txt
+   > ```
+
 2. **Configure the bot token and runtime options.**
 
    The project reads configuration values from a `.env` file. An example
