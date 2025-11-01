@@ -95,14 +95,15 @@ _PENDING_TTL = timedelta(minutes=10)
 _LIST_TTL = timedelta(hours=1)
 _PER_PAGE = 1
 
+_BTN_CREATE = "➕ Создать встречу"
+_BTN_MEETINGS = "📅 Мои встречи"
+_BTN_SETTINGS = "⚙️ Настройки"
+
 _MAIN_MENU = ReplyKeyboardMarkup(
     resize_keyboard=True,
     keyboard=[
-        [types.KeyboardButton(text="Создать встречу")],
-        [
-            types.KeyboardButton(text="Список встреч"),
-            types.KeyboardButton(text="Настройки"),
-        ],
+        [types.KeyboardButton(text=_BTN_CREATE), types.KeyboardButton(text=_BTN_MEETINGS)],
+        [types.KeyboardButton(text=_BTN_SETTINGS)],
     ],
 )
 
@@ -156,21 +157,21 @@ def _render_meeting_card(
     when_text, _ = _format_datetime_for_user(meeting.scheduled_at, settings, storage)
     lines = [f"🗓 {when_text}"]
     if meeting.meeting_type:
-        lines.append(f"Тип: {meeting.meeting_type}")
+        lines.append(f"🎯 {meeting.meeting_type}")
     elif meeting.title:
-        lines.append(f"Название: {meeting.title}")
+        lines.append(f"🎯 {meeting.title}")
     if meeting.room:
-        lines.append(f"Комната: {meeting.room}")
+        lines.append(f"📍 Комната {meeting.room}")
     if meeting.request_number:
-        lines.append(f"Заявка: {meeting.request_number}")
+        lines.append(f"🆔 Заявка №{meeting.request_number}")
     if meeting.chat_id:
         chat = storage.get_chat(meeting.chat_id)
         chat_title = chat.title if chat and chat.title else str(meeting.chat_id)
-        lines.append(f"Чат: {chat_title}")
-    lines.append(f"Организатор: {meeting.organizer_id}")
+        lines.append(f"💬 Чат: {chat_title}")
+    lines.append(f"👤 Организатор: {meeting.organizer_id}")
     if meeting.participants:
         participants = ", ".join(str(pid) for pid in meeting.participants)
-        lines.append(f"Участники: {participants}")
+        lines.append(f"👥 Участники: {participants}")
     return "\n".join(lines)
 
 
@@ -323,7 +324,7 @@ def _build_meeting_keyboard(
         for minutes in _snooze_options(settings):
             snooze_buttons.append(
                 InlineKeyboardButton(
-                    text=f"Сноуз +{minutes} мин",
+                    text=f"⏰ Сноуз +{minutes}",
                     callback_data=MeetingManageCallback(
                         action="snooze",
                         meeting_id=meeting.id,
@@ -338,7 +339,7 @@ def _build_meeting_keyboard(
         if confirm_cancel:
             builder.row(
                 InlineKeyboardButton(
-                    text="✅ Подтвердить отмену",
+                    text="✅ Да, отменяем",
                     callback_data=MeetingManageCallback(
                         action="cancel",
                         meeting_id=meeting.id,
@@ -348,7 +349,7 @@ def _build_meeting_keyboard(
                     ).pack(),
                 ),
                 InlineKeyboardButton(
-                    text="↩️ Назад",
+                    text="↩️ Вернуться",
                     callback_data=MeetingManageCallback(
                         action="cancel",
                         meeting_id=meeting.id,
@@ -361,7 +362,7 @@ def _build_meeting_keyboard(
         else:
             builder.row(
                 InlineKeyboardButton(
-                    text="Перенести",
+                    text="✏️ Редактировать",
                     callback_data=MeetingManageCallback(
                         action="reschedule",
                         meeting_id=meeting.id,
@@ -370,7 +371,7 @@ def _build_meeting_keyboard(
                     ).pack(),
                 ),
                 InlineKeyboardButton(
-                    text="Отменить",
+                    text="🗑️ Отменить",
                     callback_data=MeetingManageCallback(
                         action="cancel",
                         meeting_id=meeting.id,
@@ -381,7 +382,7 @@ def _build_meeting_keyboard(
             )
     builder.row(
         InlineKeyboardButton(
-            text="Фильтры",
+            text="🔍 Фильтры",
             callback_data=MeetingManageCallback(
                 action="filters",
                 meeting_id=meeting.id,
@@ -436,11 +437,11 @@ def _compose_page(
     if context.scope == "chat" and context.chat_id is not None:
         chat = storage.get_chat(context.chat_id)
         if chat and chat.title:
-            header.append(f"Чат: {chat.title}")
+            header.append(f"💬 {chat.title}")
     filters_summary = _format_filters(context.filters)
     if filters_summary:
-        header.append(f"Фильтры: {filters_summary}")
-    header.append(f"Страница {page + 1} из {total_pages}")
+        header.append(f"🎛️ Фильтры: {filters_summary}")
+    header.append(f"📖 Страница {page + 1} из {total_pages}")
     card_text = _render_meeting_card(meeting, settings, storage)
     text = "\n".join(header + ["", card_text])
     markup = _build_meeting_keyboard(
@@ -466,10 +467,14 @@ def _can_manage_meeting(storage: MeetingStorage, meeting: Meeting, user_id: int)
 
 
 def _render_empty_message(context: MeetingListContext) -> str:
-    base = "В этом чате нет предстоящих встреч." if context.scope == "chat" else "У вас нет предстоящих встреч."
+    base = (
+        "ℹ️ В этом чате пока нет предстоящих встреч."
+        if context.scope == "chat"
+        else "ℹ️ У вас нет предстоящих встреч."
+    )
     if context.filters:
-        return base + "\nПопробуйте изменить фильтры."
-    return base
+        return base + "\nПодправьте фильтры или создайте новую встречу кнопкой ➕."
+    return base + "\nНажмите ➕, чтобы запланировать первую встречу."
 
 
 def _parse_user_datetime_input(
@@ -526,17 +531,17 @@ def _render_settings_text(settings: UserSettings, storage: MeetingStorage) -> st
         tz = storage.timezone
         timezone = getattr(tz, "key", str(tz)) if tz else "UTC"
     lead_text = (
-        "без напоминаний"
+        "🔕 Напоминания выключены"
         if settings.default_lead_time == 0
-        else ReminderService._format_lead_time(settings.default_lead_time)
+        else f"🔔 {ReminderService._format_lead_time(settings.default_lead_time)}"
     )
     return (
-        "⚙️ Ваши настройки\n"
-        f"Часовой пояс: {timezone}\n"
-        f"Локаль: {settings.locale}\n"
-        f"Формат даты: {settings.date_format}\n"
-        f"Формат времени: {settings.time_format}\n"
-        f"Lead time по умолчанию: {lead_text}"
+        "⚙️ Личные настройки\n"
+        f"🌍 Часовой пояс: {timezone}\n"
+        f"🗣️ Локаль: {settings.locale}\n"
+        f"📅 Формат даты: {settings.date_format}\n"
+        f"⏰ Формат времени: {settings.time_format}\n"
+        f"⏳ Напоминание по умолчанию: {lead_text}"
     )
 
 
@@ -544,41 +549,41 @@ def _build_settings_keyboard(settings: UserSettings) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text="Изменить часовой пояс",
+            text="🌍 Часовой пояс",
             callback_data=SettingsCallback(action="timezone").pack(),
         )
     )
     builder.row(
         InlineKeyboardButton(
-            text="Русский · DD.MM.YYYY",
+            text="🇷🇺 DD.MM.YYYY",
             callback_data=SettingsCallback(action="locale", value="ru").pack(),
         ),
         InlineKeyboardButton(
-            text="English · YYYY-MM-DD",
+            text="🇬🇧 YYYY-MM-DD",
             callback_data=SettingsCallback(action="locale", value="en").pack(),
         ),
     )
     builder.row(
         InlineKeyboardButton(
-            text="Lead 5 мин",
+            text="⏰ +5 мин",
             callback_data=SettingsCallback(action="lead", value="300").pack(),
         ),
         InlineKeyboardButton(
-            text="10 мин",
+            text="⏰ +10 мин",
             callback_data=SettingsCallback(action="lead", value="600").pack(),
         ),
         InlineKeyboardButton(
-            text="15 мин",
+            text="⏰ +15 мин",
             callback_data=SettingsCallback(action="lead", value="900").pack(),
         ),
     )
     builder.row(
         InlineKeyboardButton(
-            text="30 мин",
+            text="⏰ +30 мин",
             callback_data=SettingsCallback(action="lead", value="1800").pack(),
         ),
         InlineKeyboardButton(
-            text="Без напоминаний",
+            text="🔕 Без напоминаний",
             callback_data=SettingsCallback(action="lead", value="0").pack(),
         ),
     )
@@ -600,24 +605,24 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
         if message.chat and message.chat.type != "private":
             chat_id = message.chat.id
             if command_chat_id and command_chat_id != chat_id:
-                return None, "Укажите корректный чат через префикс #<id>."
+                return None, "⚠️ Укажите корректный чат через префикс #<id>."
             if not storage.is_chat_registered(chat_id):
-                return None, "Этот чат не зарегистрирован для напоминаний."
+                return None, "⚠️ Этот чат не зарегистрирован. Добавьте его через администратора."
             return chat_id, None
         chat_id = command_chat_id
         if chat_id is not None:
             if not storage.is_chat_registered(chat_id):
-                return None, "Укажите зарегистрированный чат для проведения встречи."
+                return None, "⚠️ Укажите зарегистрированный чат для встреч или зарегистрируйте его."
             return chat_id, None
         if not message.from_user:
-            return None, "Не удалось определить пользователя."
+            return None, "⚠️ Не удалось определить вас. Попробуйте снова."
         available = storage.list_user_chats(message.from_user.id, roles=("admin", "user"))
         if not available:
-            return None, "У вас нет доступных чатов. Укажите чат через префикс #<id>."
+            return None, "ℹ️ У вас нет доступных чатов. Укажите чат через #<id> или запросите доступ."
         if len(available) == 1:
             return available[0].id, None
         options = ", ".join(f"#{chat.id} — {chat.title or chat.id}" for chat in available)
-        return None, f"Укажите чат через префикс #<id>. Доступные чаты: {options}"
+        return None, f"ℹ️ Укажите чат через #<id>. Доступные чаты: {options}"
 
     async def _send_meeting_list(
         message: types.Message,
@@ -627,7 +632,9 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
         filters: Dict[str, str],
     ) -> None:
         if not message.from_user:
-            await message.answer("Не удалось определить пользователя.")
+            await message.answer(
+                "⚠️ Не удалось определить вас. Попробуйте ещё раз или напишите мне в личном чате."
+            )
             return
         now = _now(storage)
         _cleanup_pending(now)
@@ -697,17 +704,21 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
         text = (message.text or "").strip()
         if text.lower() in {"отмена", "cancel"}:
             _PENDING_SETTINGS.pop(key, None)
-            await message.reply("Обновление настроек отменено.")
+            await message.reply(
+                "👌 Отменили изменение настроек. Можно выбрать действие заново в ⚙️ Настройки."
+            )
             return True
         if pending.kind == "timezone":
             try:
                 ZoneInfo(text)
             except ZoneInfoNotFoundError:
-                await message.reply("Неизвестный часовой пояс. Попробуйте ещё раз.")
+                await message.reply(
+                    "😕 Не нашли такой часовой пояс. Укажите, например, Europe/Moscow."
+                )
                 return True
             storage.update_user_settings(message.from_user.id, timezone=text)
             _PENDING_SETTINGS.pop(key, None)
-            await message.reply(f"Часовой пояс обновлён на {text}.")
+            await message.reply(f"✅ Часовой пояс обновлён на {text}.")
             return True
         return False
 
@@ -721,29 +732,33 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
         text = (message.text or "").strip()
         if text.lower() in {"отмена", "cancel"}:
             _PENDING_RESCHEDULE.pop(key, None)
-            await message.reply("Перенос встречи отменён.")
+            await message.reply("👌 Оставили встречу без изменений.")
             return True
         meeting = storage.get_meeting(pending.meeting_id)
         if not meeting:
             _PENDING_RESCHEDULE.pop(key, None)
-            await message.reply("Встреча не найдена.")
+            await message.reply(
+                "😕 Не нашли эту встречу. Обновите список и попробуйте снова."
+            )
             return True
         settings = storage.get_user_settings(message.from_user.id)
         timezone = _resolve_user_timezone(storage, settings)
         new_time = _parse_user_datetime_input(text, timezone=timezone, meeting=meeting, storage=storage)
         if not new_time:
             await message.reply(
-                "Не удалось распознать дату и время. Используйте формат ДД.ММ ЧЧ:ММ или YYYY-MM-DD HH:MM."
+                "😕 Не получилось распознать дату и время. Попробуйте формат ДД.ММ ЧЧ:ММ или YYYY-MM-DD HH:MM."
             )
             return True
         updated = storage.update_meeting(meeting.id, scheduled_at=new_time)
         _PENDING_RESCHEDULE.pop(key, None)
         if not updated:
-            await message.reply("Не удалось обновить встречу.")
+            await message.reply(
+                "⚠️ Не удалось обновить встречу. Проверьте права доступа и повторите попытку."
+            )
             return True
         await reminder.send_due_reminders()
         when_text, _ = _format_datetime_for_user(updated.scheduled_at, settings, storage)
-        await message.reply(f"Встреча перенесена на {when_text}.")
+        await message.reply(f"✅ Перенесли встречу на {when_text}.")
         context = _LIST_CONTEXTS.get(pending.context_token)
         if context:
             await _refresh_context(
@@ -762,31 +777,37 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
         _cleanup_pending(_now(storage))
         name = message.from_user.full_name if message.from_user else "друг"
         await message.answer(
-            "👋 Привет, {name}!\n"
-            "Используй кнопки ниже или команды: /help, /meetings, /schedule, /settings.".format(name=name),
+            (
+                "👋 Привет, {name}!\n\n"
+                "Выбирайте действие на клавиатуре или используйте команды /help, /meetings, /schedule, /settings."
+            ).format(name=name),
             reply_markup=_MAIN_MENU,
         )
 
     @router.message(Command("help"))
     async def handle_help(message: types.Message) -> None:
         await message.answer(
-            "Доступные действия:\n"
+            "ℹ️ Что умею:\n"
             "• /meetings [фильтры] — показать ваши встречи\n"
-            "• /schedule [фильтры] — расписание текущего чата\n"
-            "• /settings — личные настройки\n\n"
-            "Фильтры передаются в формате ключ=значение, например: /meetings date=2024-03-25 type=DEMO"
+            "• /schedule [фильтры] — расписание чата\n"
+            "• /settings — настроить формат и напоминания\n\n"
+            "Фильтры: ключ=значение, например date=2024-03-25 type=demo"
         )
 
     @router.message(Command("meetings"))
     async def handle_meetings(message: types.Message) -> None:
         if not message.from_user:
-            await message.answer("Не удалось определить пользователя.")
+            await message.answer(
+                "⚠️ Не удалось определить вас. Попробуйте повторить команду из личного чата."
+            )
             return
         chat_id: Optional[int] = None
         if message.chat and message.chat.type != "private":
             chat_id = message.chat.id
             if not storage.has_chat_role(chat_id, message.from_user.id, ("admin", "user")):
-                await message.answer("У вас нет доступа к встречам этого чата.")
+                await message.answer(
+                    "⛔ Нет доступа к встречам этого чата. Попросите администратора добавить вас."
+                )
                 return
         filters_text = ""
         if message.text:
@@ -799,12 +820,14 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
     @router.message(Command("schedule"))
     async def handle_schedule(message: types.Message) -> None:
         if not message.chat:
-            await message.answer("Команда доступна только в чатах.")
+            await message.answer("⚠️ Команда работает только в групповом чате. Откройте чат и повторите.")
             return
         if not message.from_user or not storage.has_chat_role(
             message.chat.id, message.from_user.id, ("admin", "user")
         ):
-            await message.answer("У вас нет доступа к расписанию этого чата.")
+            await message.answer(
+                "⛔ Нет доступа к расписанию этого чата. Попросите администратора выдать права."
+            )
             return
         filters_text = ""
         if message.text:
@@ -817,7 +840,9 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
     @router.message(Command("settings"))
     async def handle_settings_command(message: types.Message) -> None:
         if not message.from_user:
-            await message.answer("Не удалось определить пользователя.")
+            await message.answer(
+                "⚠️ Не удалось определить вас. Попробуйте снова из личного чата."
+            )
             return
         _cleanup_pending(_now(storage))
         text, markup = _settings_message_kwargs(storage, message.from_user.id)
@@ -830,30 +855,35 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
         _cleanup_pending(now)
         pending = _PENDING_CREATIONS.get(callback_data.token)
         if not pending:
-            await callback.answer("Запрос устарел.", show_alert=True)
+            await callback.answer("⌛ Запрос устарел. Начните создание заново.", show_alert=True)
             if callback.message:
                 await callback.message.edit_reply_markup(reply_markup=None)
             return
         if not callback.from_user or callback.from_user.id != pending.user_id:
-            await callback.answer("Недоступно.", show_alert=True)
+            await callback.answer("⛔ Эта кнопка вам недоступна.", show_alert=True)
             return
         if callback_data.decision == "cancel":
             _PENDING_CREATIONS.pop(callback_data.token, None)
             if callback.message:
-                await callback.message.edit_text("Создание встречи отменено.")
-            await callback.answer("Отменено.")
+                await callback.message.edit_text(
+                    "❎ Создание встречи отменено. Используйте кнопку ➕, чтобы начать заново."
+                )
+            await callback.answer("👌 Отменили.")
             return
         if callback_data.decision != "confirm":
             await callback.answer()
             return
+        await callback.answer("⏳ Создаём встречу…")
         command = pending.command
         if command.request_number:
             existing = storage.find_meeting_by_request_number(command.request_number)
             if existing:
                 _PENDING_CREATIONS.pop(callback_data.token, None)
                 if callback.message:
-                    await callback.message.edit_text("Встреча с таким номером заявки уже существует.")
-                await callback.answer()
+                    await callback.message.edit_text(
+                        "⚠️ Встреча с таким номером заявки уже есть. Проверьте номер и попробуйте снова."
+                    )
+                await callback.answer("⚠️ Дубликат заявки.")
                 return
         scheduled_at = pending.scheduled_at
         meeting_type = command.meeting_type or "Встреча"
@@ -872,9 +902,23 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
         await reminder.send_due_reminders()
         settings = storage.get_user_settings(pending.user_id)
         summary = _render_meeting_card(meeting, settings, storage)
+        when_text, _ = _format_datetime_for_user(meeting.scheduled_at, settings, storage)
+        summary_bits = [when_text]
+        if meeting.meeting_type:
+            summary_bits.append(meeting.meeting_type)
+        if meeting.room:
+            summary_bits.append(f"комната {meeting.room}")
+        if meeting.request_number:
+            summary_bits.append(f"№{meeting.request_number}")
+        lead_seconds = settings.default_lead_time or 0
+        if lead_seconds > 0:
+            lead_hint = f"Напомним за {ReminderService._format_lead_time(lead_seconds)}."
+        else:
+            lead_hint = "Напоминания выключены — включите их в ⚙️ Настройки."
+        created_text = f"✅ Встреча создана: {', '.join(summary_bits)}. {lead_hint}\n\n{summary}"
         if callback.message:
-            await callback.message.edit_text("Встреча создана!\n" + summary)
-        await callback.answer("Создано!")
+            await callback.message.edit_text(created_text)
+        await callback.answer("✅ Запланировали!")
 
     @router.callback_query(MeetingPaginationCallback.filter())
     async def handle_pagination(
@@ -884,14 +928,15 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
         _cleanup_pending(now)
         context = _LIST_CONTEXTS.get(callback_data.token)
         if not context:
-            await callback.answer("Список устарел. Запросите его снова.", show_alert=True)
+            await callback.answer("⌛ Список устарел. Запросите его снова командой или кнопкой.", show_alert=True)
             if callback.message:
                 await callback.message.edit_reply_markup(reply_markup=None)
             return
         if not callback.from_user or callback.from_user.id != context.user_id:
-            await callback.answer("Недоступно.", show_alert=True)
+            await callback.answer("⛔ Эта кнопка вам недоступна.", show_alert=True)
             return
         settings = storage.get_user_settings(context.user_id)
+        await callback.answer("⏳ Листаем…")
         if callback.message:
             await _refresh_context(
                 context=context,
@@ -899,7 +944,7 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
                 settings=settings,
                 message=callback.message,
             )
-        await callback.answer()
+        await callback.answer("✅ Готово!")
 
     @router.callback_query(MeetingManageCallback.filter())
     async def handle_manage(
@@ -909,27 +954,27 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
         _cleanup_pending(now)
         context = _LIST_CONTEXTS.get(callback_data.ctx or "") if callback_data.ctx else None
         if not context:
-            await callback.answer("Контекст устарел. Обновите список.", show_alert=True)
+            await callback.answer("⌛ Контекст устарел. Откройте список снова кнопкой или командой.", show_alert=True)
             if callback.message:
                 await callback.message.edit_reply_markup(reply_markup=None)
             return
         if not callback.from_user or callback.from_user.id != context.user_id:
-            await callback.answer("Недоступно.", show_alert=True)
+            await callback.answer("⛔ Эта кнопка вам недоступна.", show_alert=True)
             return
         settings = storage.get_user_settings(context.user_id)
         meeting = storage.get_meeting(callback_data.meeting_id)
         page = callback_data.page or 0
         if callback_data.action == "filters":
             summary = _format_filters(context.filters)
-            await callback.answer(summary or "Фильтры не заданы.")
+            await callback.answer(summary or "🔍 Фильтры не заданы.")
             return
         if not meeting:
-            await callback.answer("Встреча не найдена.", show_alert=True)
+            await callback.answer("😕 Не нашли эту встречу. Обновите список.", show_alert=True)
             if callback.message:
                 await _refresh_context(context=context, page=page, settings=settings, message=callback.message)
             return
         if not _can_manage_meeting(storage, meeting, callback.from_user.id):
-            await callback.answer("Недостаточно прав.", show_alert=True)
+            await callback.answer("⛔ Недостаточно прав. Обратитесь к организатору.", show_alert=True)
             return
         if callback_data.action == "snooze":
             try:
@@ -937,12 +982,13 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
             except ValueError:
                 minutes = 0
             if minutes <= 0:
-                await callback.answer("Некорректное значение.", show_alert=True)
+                await callback.answer("⚠️ Некорректное значение.", show_alert=True)
                 return
+            await callback.answer("⏳ Сдвигаем напоминание…")
             new_time = meeting.scheduled_at + timedelta(minutes=minutes)
             updated = storage.update_meeting(meeting.id, scheduled_at=new_time)
             if not updated:
-                await callback.answer("Не удалось обновить встречу.", show_alert=True)
+                await callback.answer("⚠️ Не удалось обновить встречу. Попробуйте позже.", show_alert=True)
                 return
             await reminder.send_due_reminders()
             if callback.message:
@@ -953,7 +999,7 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
                     message=callback.message,
                     target_meeting_id=meeting.id,
                 )
-            await callback.answer(f"Перенесено на +{minutes} мин.")
+            await callback.answer(f"✅ Сдвинули на +{minutes} мин.")
             return
         if callback_data.action == "reschedule":
             key = (
@@ -970,26 +1016,27 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
                 message=callback.message,
                 requested_at=now,
             )
-            await callback.answer("Отправьте новую дату и время сообщением.", show_alert=True)
+            await callback.answer("📝 Отправьте новую дату и время сообщением.", show_alert=True)
             if callback.message:
                 await callback.message.reply(
-                    "Введите новую дату и время встречи (ДД.ММ ЧЧ:ММ или YYYY-MM-DD HH:MM). Для отмены отправьте 'отмена'."
+                    "✍️ Введите новую дату и время (ДД.ММ ЧЧ:ММ или YYYY-MM-DD HH:MM). Для отмены отправьте 'отмена'."
                 )
             return
         if callback_data.action == "cancel":
             if callback_data.value == "confirm":
+                await callback.answer("⏳ Отменяем встречу…")
                 if not storage.cancel_meeting(meeting.id):
-                    await callback.answer("Не удалось отменить встречу.", show_alert=True)
+                    await callback.answer("⚠️ Не удалось отменить встречу.", show_alert=True)
                     return
                 await reminder.send_due_reminders()
                 if callback.message:
                     await _refresh_context(context=context, page=page, settings=settings, message=callback.message)
-                await callback.answer("Встреча отменена.")
+                await callback.answer("✅ Встреча отменена.")
                 return
             if callback_data.value == "no":
                 if callback.message:
                     await _refresh_context(context=context, page=page, settings=settings, message=callback.message)
-                await callback.answer("Отмена операции.")
+                await callback.answer("👌 Оставили без изменений.")
                 return
             if callback.message:
                 await _refresh_context(
@@ -999,9 +1046,9 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
                     message=callback.message,
                     confirm_cancel_for=meeting.id,
                 )
-            await callback.answer("Подтвердите отмену.")
+            await callback.answer("❓ Подтвердите отмену.")
             return
-        await callback.answer()
+        await callback.answer("✅ Готово!")
 
     @router.callback_query(SettingsCallback.filter())
     async def handle_settings_callback(
@@ -1024,10 +1071,13 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
                 chat_id=callback.message.chat.id if callback.message else None,
                 requested_at=now,
             )
-            await callback.answer("Отправьте название часового пояса, например Europe/Moscow.", show_alert=True)
+            await callback.answer(
+                "📝 Отправьте название часового пояса сообщением, например Europe/Moscow.",
+                show_alert=True,
+            )
             if callback.message:
                 await callback.message.reply(
-                    "Введите новый часовой пояс (например Europe/Moscow). Для отмены отправьте 'отмена'."
+                    "✍️ Введите новый часовой пояс (например Europe/Moscow). Для отмены отправьте 'отмена'."
                 )
             return
         if callback_data.action == "locale":
@@ -1039,7 +1089,7 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
                     date_format="%d.%m.%Y",
                     time_format="%H:%M",
                 )
-                await callback.answer("Локаль обновлена.")
+                await callback.answer("✅ Форматы переключены на 🇷🇺.")
             elif value == "en":
                 storage.update_user_settings(
                     user_id,
@@ -1047,25 +1097,25 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
                     date_format="%Y-%m-%d",
                     time_format="%H:%M",
                 )
-                await callback.answer("Locale updated.")
+                await callback.answer("✅ Formats switched to 🇬🇧.")
             else:
-                await callback.answer("Неизвестная локаль.", show_alert=True)
+                await callback.answer("⚠️ Неизвестная локаль.", show_alert=True)
                 return
         elif callback_data.action == "lead":
             try:
                 seconds = int(callback_data.value or "0")
             except ValueError:
-                await callback.answer("Некорректное значение.", show_alert=True)
+                await callback.answer("⚠️ Некорректное значение.", show_alert=True)
                 return
             if seconds < 0:
                 seconds = 0
             storage.update_user_settings(user_id, default_lead_time=seconds)
             if seconds == 0:
-                await callback.answer("Напоминания отключены.")
+                await callback.answer("🔕 Напоминания отключены.")
             else:
-                await callback.answer(f"Напоминание {ReminderService._format_lead_time(seconds)}.")
+                await callback.answer(f"🔔 Напомним за {ReminderService._format_lead_time(seconds)}.")
         else:
-            await callback.answer()
+            await callback.answer("✅ Готово!")
             return
         if callback.message:
             text, markup = _settings_message_kwargs(storage, user_id)
@@ -1087,16 +1137,16 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
             return
         text = message.text.strip()
         lowered = text.lower()
-        if lowered == "создать встречу":
+        if message.text == _BTN_CREATE or lowered == "создать встречу":
             await message.answer(
-                "Отправьте строку формата: <дата> <тип> <время> <комната> <заявка>. Например: 25.03 DEMO 14:00 R101 12345"
+                "✍️ Отправьте строку: <дата> <тип> <время> <комната> <заявка>. Например: 25.03 DEMO 14:00 R101 12345"
             )
             return
-        if lowered == "список встреч":
+        if message.text == _BTN_MEETINGS or lowered in {"список встреч", "мои встречи"}:
             chat_id = message.chat.id if message.chat and message.chat.type != "private" else None
             await _send_meeting_list(message, scope="user", chat_id=chat_id, filters={})
             return
-        if lowered == "настройки":
+        if message.text == _BTN_SETTINGS or lowered == "настройки":
             text, markup = _settings_message_kwargs(storage, message.from_user.id)
             await message.answer(text, reply_markup=markup)
             return
@@ -1111,18 +1161,26 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
             return
         user_id = message.from_user.id
         if not storage.has_chat_role(chat_id, user_id, ("admin", "user")):
-            await message.answer("У вас нет прав для действий в этом чате.")
+            await message.answer(
+                "⛔ Нет прав для действий в этом чате. Попросите администратора выдать доступ."
+            )
             return
         if command.action != "create":
-            await message.answer("Используйте кнопки карточки встречи для управления.")
+            await message.answer(
+                "ℹ️ Используйте кнопки карточки встречи для управления расписанием."
+            )
             return
         if not command.scheduled_at:
-            await message.answer("Не удалось определить дату и время встречи.")
+            await message.answer(
+                "⚠️ Не удалось определить дату и время. Уточните их и отправьте ещё раз."
+            )
             return
         if command.request_number:
             existing = storage.find_meeting_by_request_number(command.request_number)
             if existing:
-                await message.answer("Встреча с таким номером заявки уже существует.")
+                await message.answer(
+                    "⚠️ Встреча с таким номером заявки уже есть. Выберите другой номер."
+                )
                 return
         settings = storage.get_user_settings(user_id)
         timezone = _resolve_user_timezone(storage, settings)
@@ -1156,16 +1214,16 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
         keyboard = InlineKeyboardBuilder()
         keyboard.row(
             InlineKeyboardButton(
-                text="✅ Подтвердить",
+                text="✅ Запланировать",
                 callback_data=MeetingCreationCallback(token=pending.token, decision="confirm").pack(),
             ),
             InlineKeyboardButton(
-                text="❌ Отменить",
+                text="🗑️ Отменить",
                 callback_data=MeetingCreationCallback(token=pending.token, decision="cancel").pack(),
             ),
         )
         await message.answer(
-            "Создать встречу?\n" + summary,
+            "Создать встречу?\n\n" + summary,
             reply_markup=keyboard.as_markup(),
         )
 
