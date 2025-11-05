@@ -27,41 +27,52 @@ class MeetingCommand:
     chat_id: Optional[int] = None
 
 
-def parse_meeting_command(text: str, now: datetime) -> Optional[MeetingCommand]:
-    """Parse a chat message into a structured command."""
+def parse_meeting_command(
+    text: str, now: datetime
+) -> Tuple[Optional[MeetingCommand], Optional[str]]:
+    """Parse a chat message into a structured command.
+
+    Returns a tuple of ``(command, error_message)``. Only one element of the
+    tuple will be non-``None``:
+
+    * ``command`` – a structured representation of the recognised command.
+    * ``error_message`` – a human friendly explanation of why parsing failed.
+    """
 
     text = text.strip()
     if not text:
-        return None
+        return None, None
 
     chat_id, remainder = _extract_chat_prefix(text)
     text = remainder.strip()
     if not text:
-        return None
+        return None, None
 
     lower = text.lower()
 
-    command = _parse_create(text, now)
+    command, error = _parse_create(text, now)
     if command:
         command.chat_id = chat_id
-        return command
+        return command, None
+    if error:
+        return None, error
 
     command = _parse_cancel(lower)
     if command:
         command.chat_id = chat_id
-        return command
+        return command, None
 
     command = _parse_snooze(lower)
     if command:
         command.chat_id = chat_id
-        return command
+        return command, None
 
     command = _parse_update(text, lower, now)
     if command:
         command.chat_id = chat_id
-        return command
+        return command, None
 
-    return None
+    return None, None
 
 
 def _extract_chat_prefix(text: str) -> Tuple[Optional[int], str]:
@@ -83,29 +94,59 @@ def _extract_chat_prefix(text: str) -> Tuple[Optional[int], str]:
     return chat_id, remainder
 
 
-def _parse_create(text: str, now: datetime) -> Optional[MeetingCommand]:
+def _parse_create(
+    text: str, now: datetime
+) -> Tuple[Optional[MeetingCommand], Optional[str]]:
     parts = text.split()
     if len(parts) != 5:
-        return None
+        return (
+            None,
+            "Не удалось распознать команду. Используйте формат: "
+            "ДД.ММ ТИП ЧЧ:ММ ПЕРЕГОВОРНАЯ НОМЕР.\n"
+            "Например: 25.03 DEMO 14:00 R101 12345",
+        )
 
     date_token, type_token, time_token, room_token, number_token = parts
     date_parts = _parse_date_token(date_token)
     time_parts = _parse_time_token(time_token)
-    if not date_parts or not time_parts or not _NUMBER_RE.match(number_token):
-        return None
+    if not date_parts:
+        return (
+            None,
+            "Некорректная дата. Используйте формат ДД.ММ или ДД.ММ.ГГГГ.\n"
+            "Например: 25.03 или 25.03.2024",
+        )
+    if not time_parts:
+        return (
+            None,
+            "Некорректное время. Используйте формат ЧЧ:ММ (24 часа).\n"
+            "Например: 14:00",
+        )
+    if not _NUMBER_RE.match(number_token):
+        return (
+            None,
+            "Некорректный номер заявки. Укажите только цифры.\n"
+            "Например: 12345",
+        )
 
     scheduled_at = _build_datetime(*date_parts, *time_parts, now=now)
     if scheduled_at is None:
-        return None
+        return (
+            None,
+            "Некорректная дата или время. Проверьте существование даты.\n"
+            "Например: 29.02.2024 10:00",
+        )
 
     meeting_type = _normalize_type(type_token)
     room = _normalize_room(room_token)
-    return MeetingCommand(
-        action="create",
-        request_number=number_token,
-        scheduled_at=scheduled_at,
-        meeting_type=meeting_type,
-        room=room,
+    return (
+        MeetingCommand(
+            action="create",
+            request_number=number_token,
+            scheduled_at=scheduled_at,
+            meeting_type=meeting_type,
+            room=room,
+        ),
+        None,
     )
 
 

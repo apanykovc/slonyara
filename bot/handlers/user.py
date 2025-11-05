@@ -1150,7 +1150,10 @@ def create_router(storage: MeetingStorage, reminder: ReminderService) -> Router:
             text, markup = _settings_message_kwargs(storage, message.from_user.id)
             await message.answer(text, reply_markup=markup)
             return
-        command = parse_meeting_command(text, now)
+        command, error = parse_meeting_command(text, now)
+        if error:
+            await message.answer(error)
+            return
         if not command:
             return
         chat_id, error = _resolve_target_chat(message, command.chat_id)
