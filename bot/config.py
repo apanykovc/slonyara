@@ -126,7 +126,7 @@ def load_config() -> Config:
     admin_usernames = _parse_admin_usernames(
         os.getenv("BOT_ADMIN_USERNAMES"), default=("panykovc",)
     )
-    storage_path = Path(os.getenv("BOT_STORAGE_PATH", "data/meetings.json")).expanduser()
+    storage_path = Path(os.getenv("BOT_STORAGE_PATH", "data/meetings.db")).expanduser()
     reminder_check_interval = int(os.getenv("BOT_REMINDER_INTERVAL", "60"))
     reminder_lead_times = _parse_lead_times(
         os.getenv("BOT_REMINDER_LEAD"), default=(1800, 600, 0)
