@@ -11,4 +11,3 @@ tzdata==2024.1
 # available before installing the dependencies on Windows, or use Python
 # 3.12 where wheels are still published.
 pydantic==2.5.3
-pydantic-core==2.14.6

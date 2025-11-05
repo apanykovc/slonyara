@@ -338,14 +338,15 @@ class SenderAiohttpSession(AiohttpSession):
         method: TelegramMethod[T],
         timeout: Optional[int] = None,
     ) -> T:
-        label = method.__api_method__
+        label = getattr(method, "__api_method__", "<unknown>")
+        parent_make_request = super().make_request  # захватываем bound-метод с self
+
         return await self._sender.request(
-            lambda: super().make_request(bot, method, timeout=timeout),
+            lambda: parent_make_request(bot, method, timeout=timeout),
             timeout=float(timeout) if timeout is not None else None,
             label=label,
         )
-
-
+    
 class SenderContextMiddleware(BaseMiddleware):
     """Middleware that routes handler requests to the UI queue."""
 
