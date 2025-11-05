@@ -1,8 +1,8 @@
-"""Entry point for the Telegram meeting reminder bot."""
+"""Application bootstrap helpers."""
 from __future__ import annotations
 
-import asyncio
 import logging
+from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
@@ -20,15 +20,11 @@ from bot.infra import (
 from bot.models.storage import MeetingStorage
 from bot.services.reminder import ReminderService, TimeoutProfile
 
+_logger = logging.getLogger(__name__)
 
-async def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
-    load_dotenv()
-
-    config = load_config()
-    parse_mode = getattr(ParseMode, config.bot.parse_mode.upper(), ParseMode.HTML)
-    sender = TelegramSender(
+def _create_sender(config) -> TelegramSender:
+    return TelegramSender(
         ui=TelegramSenderConfig(
             timeout=config.reminder.timeouts.ui,
             max_attempts=2,
@@ -47,18 +43,17 @@ async def main() -> None:
         ),
     )
 
+
+@asynccontextmanager
+async def build_runtime():
+    load_dotenv()
+    config = load_config()
+    sender = _create_sender(config)
     session = SenderAiohttpSession(sender)
-    bot = Bot(token=config.bot.token, parse_mode=parse_mode, session=session)
+    bot = Bot(token=config.bot.token, parse_mode=getattr(ParseMode, config.bot.parse_mode.upper(), ParseMode.HTML), session=session)
     dispatcher = Dispatcher()
     dispatcher.update.outer_middleware.register(SenderContextMiddleware(sender))
-
-    storage = MeetingStorage(
-        config.storage_path,
-        timezone=config.timezone,
-        default_lead_times=config.reminder.lead_times,
-        default_user_lead_time=config.reminder.default_lead_time,
-        default_locale=config.locale,
-    )
+    storage = create_storage(config)
     reminder = ReminderService(
         bot=bot,
         sender=sender,
@@ -91,11 +86,27 @@ async def main() -> None:
         config.reminder.lead_times,
     )
 
-    await dispatcher.start_polling(bot)
-
-
-if __name__ == "__main__":
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+        yield config, dispatcher, bot, storage
+    finally:
+        storage.close()
+        await session.close()
+
+
+def create_storage(config) -> MeetingStorage:
+    """Construct a :class:`MeetingStorage` instance from configuration."""
+
+    return MeetingStorage(
+        config.storage_path,
+        timezone=config.timezone,
+        default_lead_times=config.reminder.lead_times,
+        default_user_lead_time=config.reminder.default_lead_time,
+        default_locale=config.locale,
+    )
+
+
+async def run_bot() -> None:
+    async with build_runtime() as (config, dispatcher, bot, _storage):
+        _logger.info("Starting bot with database at %s", config.storage_path)
+        await dispatcher.start_polling(bot)
+        _logger.info("Bot stopped")

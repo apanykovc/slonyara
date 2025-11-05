@@ -22,7 +22,16 @@ from typing import Dict, Tuple
 # -- Public API -----------------------------------------------------------------
 
 #: Supported log categories that should be used across the code base.
-CATEGORIES: Tuple[str, ...] = ("meeting_created", "reminder_sent", "error")
+CATEGORIES: Tuple[str, ...] = (
+    "schema",
+    "meeting_created",
+    "meeting_updated",
+    "meeting_canceled",
+    "reminder_sent",
+    "chat_updated",
+    "settings_updated",
+    "error",
+)
 
 
 @dataclass(frozen=True)
@@ -37,9 +46,14 @@ class _Colour:
 
 
 _CATEGORY_COLOURS: Dict[str, _Colour] = {
-    "meeting_created": _Colour("\x1b[38;5;39m"),  # Blue
-    "reminder_sent": _Colour("\x1b[38;5;70m"),     # Green
-    "error": _Colour("\x1b[38;5;196m"),           # Red
+    "schema": _Colour("\x1b[38;5;33m"),
+    "meeting_created": _Colour("\x1b[38;5;39m"),
+    "meeting_updated": _Colour("\x1b[38;5;44m"),
+    "meeting_canceled": _Colour("\x1b[38;5;171m"),
+    "reminder_sent": _Colour("\x1b[38;5;70m"),
+    "chat_updated": _Colour("\x1b[38;5;178m"),
+    "settings_updated": _Colour("\x1b[38;5;250m"),
+    "error": _Colour("\x1b[38;5;196m"),
 }
 
 
