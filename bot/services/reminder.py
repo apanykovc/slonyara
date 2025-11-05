@@ -6,13 +6,14 @@ import logging
 import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Iterable, Optional, Set, Tuple
+from typing import Dict, Iterable, Optional, Set, Tuple
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 
+from bot.infra import TelegramSender
 from bot.models.storage import ChatSettings, Meeting, MeetingStorage
 
 _logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ class _ReminderJob:
     chat_id: int
     lead_time: int
     attempts: int = 0
+    enqueued_at: datetime | None = None
 
     @property
     def identity(self) -> Tuple[str, int, int]:
@@ -44,6 +46,7 @@ class ReminderService:
     def __init__(
         self,
         bot: Bot,
+        sender: TelegramSender,
         storage: MeetingStorage,
         *,
         lead_times: Iterable[int],
@@ -56,6 +59,7 @@ class ReminderService:
         timeout_profile: TimeoutProfile | None = None,
     ) -> None:
         self._bot = bot
+        self._sender = sender
         self._storage = storage
         self._lead_times: Tuple[int, ...] = tuple(sorted(set(int(max(0, lt)) for lt in lead_times))) or (0,)
         self._check_interval = check_interval
@@ -67,9 +71,11 @@ class ReminderService:
         self._timeout_profile = timeout_profile or TimeoutProfile()
         self._scheduler: Optional[AsyncIOScheduler] = None
         self._worker_task: Optional[asyncio.Task] = None
+        self._watchdog_task: Optional[asyncio.Task] = None
         self._queue: asyncio.Queue[_ReminderJob] = asyncio.Queue()
-        self._pending: Set[Tuple[str, int, int]] = set()
+        self._pending: Dict[Tuple[str, int, int], _ReminderJob] = {}
         self._refresh_lock = asyncio.Lock()
+        self._watchdog_interval = max(10, int(self._check_interval))
 
     @property
     def timezone(self) -> ZoneInfo:
@@ -99,11 +105,13 @@ class ReminderService:
             )
         if self._worker_task is None:
             self._worker_task = asyncio.create_task(self._run_worker(), name="reminder-worker")
+        if self._watchdog_task is None:
+            self._watchdog_task = asyncio.create_task(self._watchdog(), name="reminder-watchdog")
         await self.refresh_schedule()
         _logger.info("Reminder service started")
 
     async def stop(self) -> None:
-        tasks = [task for task in (self._worker_task,) if task is not None]
+        tasks = [task for task in (self._worker_task, self._watchdog_task) if task is not None]
         for task in tasks:
             task.cancel()
         if self._scheduler is not None:
@@ -115,6 +123,7 @@ class ReminderService:
             except asyncio.CancelledError:
                 pass
         self._worker_task = None
+        self._watchdog_task = None
         while not self._queue.empty():
             self._queue.get_nowait()
             self._queue.task_done()
@@ -125,12 +134,13 @@ class ReminderService:
         try:
             while True:
                 job = await self._queue.get()
+                job.enqueued_at = None
                 success = False
                 try:
                     success = await self._deliver(job)
                 finally:
                     if success:
-                        self._pending.discard(job.identity)
+                        self._pending.pop(job.identity, None)
                     self._queue.task_done()
         except asyncio.CancelledError:
             _logger.debug("Reminder worker cancelled")
@@ -174,8 +184,35 @@ class ReminderService:
     async def _enqueue(self, job: _ReminderJob, *, force: bool = False) -> None:
         if not force and job.identity in self._pending:
             return
-        self._pending.add(job.identity)
+        job.enqueued_at = datetime.now(tz=self._timezone)
+        self._pending[job.identity] = job
         await self._queue.put(job)
+
+    async def _watchdog(self) -> None:
+        threshold = max(self._timeout_profile.background * 2, 60)
+        try:
+            while True:
+                await asyncio.sleep(self._watchdog_interval)
+                await self._reconcile_pending(threshold)
+        except asyncio.CancelledError:
+            _logger.debug("Reminder watchdog cancelled")
+            raise
+
+    async def _reconcile_pending(self, threshold: float) -> None:
+        now = datetime.now(tz=self._timezone)
+        stale: list[_ReminderJob] = []
+        for job in list(self._pending.values()):
+            if job.enqueued_at is None:
+                continue
+            elapsed = (now - job.enqueued_at).total_seconds()
+            if elapsed > threshold:
+                stale.append(job)
+        for job in stale:
+            _logger.warning(
+                "Watchdog re-enqueue reminder %s after %.2fs delay", job.identity, threshold
+            )
+            await self._enqueue(job, force=True)
+        await self.refresh_schedule()
 
     async def _deliver(self, job: _ReminderJob) -> bool:
         meeting = self._storage.get_meeting(job.meeting_id)
@@ -193,10 +230,13 @@ class ReminderService:
             return True
         message = self._render_message(meeting, job.lead_time)
         try:
-            await self._bot.send_message(
-                job.chat_id,
-                message,
-                timeout=self._timeout_profile.background,
+            await self._sender.send_background(
+                lambda: self._bot.send_message(
+                    job.chat_id,
+                    message,
+                    timeout=self._timeout_profile.background,
+                ),
+                label=f"reminder:{job.meeting_id}:{job.lead_time}",
             )
         except Exception:  # pragma: no cover - networking errors are logged
             job.attempts += 1
