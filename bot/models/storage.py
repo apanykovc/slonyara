@@ -433,10 +433,19 @@ class MeetingStorage:
         timezone: ZoneInfo | None = None,
         *,
         default_lead_times: Sequence[int] | None = None,
+        default_user_lead_time: int | None = None,
+        default_locale: str | None = None,
     ) -> None:
         self._path = path
         self._timezone = timezone
         self._default_lead_times: tuple[int, ...] = tuple(default_lead_times or ())
+        if default_user_lead_time is None:
+            default_user_lead_time = 900
+        self._default_user_lead_time = max(0, int(default_user_lead_time))
+        self._default_locale = (default_locale or "ru_RU").strip() or "ru_RU"
+        self._default_timezone_name = (
+            getattr(self._timezone, "key", str(self._timezone)) if self._timezone else None
+        )
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self._path)
@@ -1096,6 +1105,8 @@ class MeetingStorage:
             default = self._default_lead_times or (1800, 600, 0)
             chat.lead_times = list(default)
         chat.lead_times = self._normalize_lead_times(chat.lead_times)
+        if not chat.timezone and self._default_timezone_name:
+            chat.timezone = self._default_timezone_name
         normalized_roles: dict[int, RoleName] = {}
         for user_id, role in chat.roles.items():
             try:
@@ -1115,8 +1126,12 @@ class MeetingStorage:
         return chat
 
     def _ensure_user_defaults(self, settings: UserSettings) -> UserSettings:
-        if not settings.locale:
-            settings.locale = "ru_RU"
+        if settings.created_at is None:
+            settings.default_lead_time = self._default_user_lead_time
+        if not settings.locale or settings.created_at is None:
+            settings.locale = self._default_locale
+        if not settings.timezone and self._default_timezone_name:
+            settings.timezone = self._default_timezone_name
         if not settings.date_format:
             settings.date_format = "%d.%m.%Y"
         if not settings.time_format:
