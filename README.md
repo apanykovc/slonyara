@@ -64,3 +64,10 @@ Utilities for structured logging across the project.
    not found on 'main' while trying to find 'main.py'`. Dropping the
    `.py` suffix is enough to resolve the problem because the `-m` flag
    expects a module name (`main`) rather than a file name (`main.py`).
+
+## Architecture
+
+The [architecture overview](docs/architecture.md) describes the layered
+design of the bot, infrastructure components (such as the centralized
+`TelegramSender` queue), the click-guard workflow, and the logging and
+metrics conventions used throughout the project.
