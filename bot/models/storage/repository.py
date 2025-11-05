@@ -1,427 +1,37 @@
-"""Persistence layer for meetings and bot settings backed by SQLite."""
+"""SQLite-backed storage implementation with audit logging."""
 from __future__ import annotations
 
 import logging
 import sqlite3
 import threading
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Literal, NamedTuple, Optional, Sequence, Tuple, cast
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, cast
 from uuid import uuid4
 
 from zoneinfo import ZoneInfo
 
-_logger = logging.getLogger(__name__)
+from slonyara.logging_config import get_category_logger
 
-RoleName = Literal["admin", "user"]
-_VALID_ROLES: Tuple[RoleName, ...] = ("admin", "user")
-
-
-def _normalize_role(value: Any) -> RoleName | None:
-    if value is None:
-        return None
-    text = str(value).strip().lower()
-    if text in _VALID_ROLES:
-        return cast(RoleName, text)
-    return None
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def _ensure_tz(dt: datetime, tz: ZoneInfo | None) -> datetime:
-    if dt.tzinfo is None:
-        if tz is not None:
-            return dt.replace(tzinfo=tz)
-        return dt.replace(tzinfo=timezone.utc)
-    if tz is None:
-        return dt
-    return dt.astimezone(tz)
-
-
-@dataclass(slots=True)
-class Meeting:
-    """Data container that represents a planned meeting."""
-
-    id: str
-    title: str
-    scheduled_at: datetime
-    organizer_id: int
-    participants: List[int] = field(default_factory=list)
-    description: Optional[str] = None
-    reminder_sent: bool = False
-    meeting_type: Optional[str] = None
-    room: Optional[str] = None
-    request_number: Optional[str] = None
-    chat_id: Optional[int] = None
-    status: str = "planned"
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
-            "id": self.id,
-            "title": self.title,
-            "scheduled_at": self.scheduled_at.isoformat(),
-            "organizer_id": self.organizer_id,
-            "participants": self.participants,
-            "description": self.description,
-            "reminder_sent": self.reminder_sent,
-            "meeting_type": self.meeting_type,
-            "room": self.room,
-            "request_number": self.request_number,
-            "chat_id": self.chat_id,
-            "status": self.status,
-        }
-        if self.created_at is not None:
-            payload["created_at"] = self.created_at.isoformat()
-        if self.updated_at is not None:
-            payload["updated_at"] = self.updated_at.isoformat()
-        return payload
-
-    @classmethod
-    def from_dict(cls, payload: Dict[str, Any]) -> "Meeting":
-        scheduled = datetime.fromisoformat(payload["scheduled_at"])
-        created_at_raw = payload.get("created_at")
-        updated_at_raw = payload.get("updated_at")
-        created_at = datetime.fromisoformat(created_at_raw) if created_at_raw else None
-        updated_at = datetime.fromisoformat(updated_at_raw) if updated_at_raw else None
-        return cls(
-            id=str(payload["id"]),
-            title=str(payload.get("title", "")),
-            scheduled_at=scheduled,
-            organizer_id=int(payload.get("organizer_id", 0)),
-            participants=[int(pid) for pid in payload.get("participants", [])],
-            description=payload.get("description"),
-            reminder_sent=bool(payload.get("reminder_sent", False)),
-            meeting_type=payload.get("meeting_type"),
-            room=payload.get("room"),
-            request_number=payload.get("request_number"),
-            chat_id=payload.get("chat_id"),
-            status=str(payload.get("status", "planned")),
-            created_at=created_at,
-            updated_at=updated_at,
-        )
-
-
-@dataclass(slots=True)
-class ChatSettings:
-    """Persistent settings and permissions for a chat."""
-
-    id: int
-    title: str = ""
-    lead_times: List[int] = field(default_factory=list)
-    admin_ids: List[int] = field(default_factory=list)
-    roles: Dict[int, RoleName] = field(default_factory=dict)
-    reminder_log: Dict[str, List[int]] = field(default_factory=dict)
-    timezone: Optional[str] = None
-    default_lead: Optional[int] = None
-    is_active: bool = True
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.id,
-            "title": self.title,
-            "lead_times": self.lead_times,
-            "admin_ids": self.admin_ids,
-            "roles": {str(user_id): role for user_id, role in self.roles.items()},
-            "reminder_log": self.reminder_log,
-            "timezone": self.timezone,
-            "default_lead": self.default_lead,
-            "is_active": self.is_active,
-        }
-
-    @classmethod
-    def from_dict(cls, payload: Dict[str, Any]) -> "ChatSettings":
-        lead_times: list[int] = []
-        for value in payload.get("lead_times", []) or []:
-            try:
-                seconds = int(value)
-            except (TypeError, ValueError):
-                continue
-            if seconds < 0:
-                continue
-            lead_times.append(seconds)
-        admin_ids: list[int] = []
-        for value in payload.get("admin_ids", []) or []:
-            try:
-                admin_ids.append(int(value))
-            except (TypeError, ValueError):
-                continue
-        roles_payload = payload.get("roles", {}) or {}
-        roles: dict[int, RoleName] = {}
-        for raw_user_id, raw_role in roles_payload.items():
-            try:
-                user_id = int(raw_user_id)
-            except (TypeError, ValueError):
-                continue
-            role = _normalize_role(raw_role)
-            if role is None:
-                continue
-            roles[user_id] = role
-        for admin_id in admin_ids:
-            roles.setdefault(admin_id, "admin")
-        for user_id, role in list(roles.items()):
-            if role == "admin" and user_id not in admin_ids:
-                admin_ids.append(user_id)
-        admin_ids = list(dict.fromkeys(admin_ids))
-        reminder_log: dict[str, list[int]] = {}
-        for key, values in (payload.get("reminder_log", {}) or {}).items():
-            normalized: list[int] = []
-            for value in values:
-                try:
-                    normalized.append(int(value))
-                except (TypeError, ValueError):
-                    continue
-            reminder_log[str(key)] = normalized
-        return cls(
-            id=int(payload["id"]),
-            title=str(payload.get("title", "")),
-            lead_times=lead_times,
-            admin_ids=admin_ids,
-            roles=roles,
-            reminder_log=reminder_log,
-            timezone=payload.get("timezone"),
-            default_lead=payload.get("default_lead"),
-            is_active=bool(payload.get("is_active", True)),
-        )
-
-
-@dataclass(slots=True)
-class UserSettings:
-    """Persistent preferences for an individual user."""
-
-    id: int
-    timezone: Optional[str] = None
-    locale: str = "ru_RU"
-    date_format: str = "%d.%m.%Y"
-    time_format: str = "%H:%M"
-    default_lead_time: int = 900
-    role: RoleName = "user"
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
-            "id": self.id,
-            "timezone": self.timezone,
-            "locale": self.locale,
-            "date_format": self.date_format,
-            "time_format": self.time_format,
-            "default_lead_time": self.default_lead_time,
-            "role": self.role,
-        }
-        if self.created_at is not None:
-            payload["created_at"] = self.created_at.isoformat()
-        if self.updated_at is not None:
-            payload["updated_at"] = self.updated_at.isoformat()
-        return payload
-
-    @classmethod
-    def from_dict(cls, payload: Dict[str, Any]) -> "UserSettings":
-        timezone_value = payload.get("timezone")
-        if timezone_value:
-            timezone_value = str(timezone_value)
-        default_lead_time = payload.get("default_lead_time", 900)
-        try:
-            default_lead_time = int(default_lead_time)
-        except (TypeError, ValueError):
-            default_lead_time = 900
-        if default_lead_time < 0:
-            default_lead_time = 0
-        created_at_raw = payload.get("created_at")
-        updated_at_raw = payload.get("updated_at")
-        created_at = datetime.fromisoformat(created_at_raw) if created_at_raw else None
-        updated_at = datetime.fromisoformat(updated_at_raw) if updated_at_raw else None
-        role = _normalize_role(payload.get("role")) or "user"
-        return cls(
-            id=int(payload.get("id", 0)),
-            timezone=timezone_value,
-            locale=str(payload.get("locale", "ru_RU")),
-            date_format=str(payload.get("date_format", "%d.%m.%Y")),
-            time_format=str(payload.get("time_format", "%H:%M")),
-            default_lead_time=default_lead_time,
-            role=role,
-            created_at=created_at,
-            updated_at=updated_at,
-        )
-
-
-class Migration(NamedTuple):
-    version: int
-    upgrade: Callable[[sqlite3.Connection], None]
-    downgrade: Callable[[sqlite3.Connection], None]
-
-
-def _upgrade_v1(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            role TEXT NOT NULL DEFAULT 'user',
-            tz TEXT,
-            locale TEXT,
-            date_format TEXT,
-            time_format TEXT,
-            default_lead INTEGER,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS chats (
-            chat_id INTEGER PRIMARY KEY,
-            type TEXT,
-            title TEXT,
-            default_lead INTEGER,
-            tz TEXT,
-            is_active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS meetings (
-            id TEXT PRIMARY KEY,
-            chat_id INTEGER,
-            creator_user_id INTEGER,
-            title TEXT NOT NULL DEFAULT '',
-            description TEXT,
-            scheduled_at TEXT NOT NULL,
-            date_utc TEXT NOT NULL,
-            start_time_utc TEXT NOT NULL,
-            type TEXT,
-            room TEXT,
-            ticket_no TEXT,
-            status TEXT NOT NULL DEFAULT 'planned',
-            reminder_sent INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE SET NULL,
-            FOREIGN KEY(creator_user_id) REFERENCES users(user_id) ON DELETE SET NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS meeting_participants (
-            meeting_id TEXT NOT NULL,
-            user_id INTEGER NOT NULL,
-            PRIMARY KEY (meeting_id, user_id),
-            FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS reminders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            meeting_id TEXT NOT NULL,
-            fire_at TEXT NOT NULL,
-            lead_minutes INTEGER NOT NULL,
-            sent_at TEXT,
-            status TEXT NOT NULL DEFAULT 'scheduled',
-            dedup_key TEXT,
-            UNIQUE(dedup_key),
-            FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            at TEXT NOT NULL,
-            who_user_id INTEGER,
-            action TEXT NOT NULL,
-            entity_type TEXT NOT NULL,
-            entity_id TEXT,
-            payload_json TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS locks (
-            key TEXT PRIMARY KEY,
-            ttl_until TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS chat_lead_times (
-            chat_id INTEGER NOT NULL,
-            lead_seconds INTEGER NOT NULL,
-            PRIMARY KEY (chat_id, lead_seconds),
-            FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS chat_roles (
-            chat_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            role TEXT NOT NULL,
-            PRIMARY KEY (chat_id, user_id),
-            FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS chat_reminder_log (
-            chat_id INTEGER NOT NULL,
-            meeting_id TEXT NOT NULL,
-            lead_seconds INTEGER NOT NULL,
-            PRIMARY KEY (chat_id, meeting_id, lead_seconds),
-            FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE,
-            FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
-        )
-        """
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_meetings_chat_id ON meetings(chat_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_meetings_scheduled_at ON meetings(scheduled_at)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_reminders_meeting ON reminders(meeting_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_roles_user ON chat_roles(user_id)")
-
-
-def _downgrade_v1(conn: sqlite3.Connection) -> None:
-    conn.execute("DROP INDEX IF EXISTS idx_chat_roles_user")
-    conn.execute("DROP INDEX IF EXISTS idx_reminders_meeting")
-    conn.execute("DROP INDEX IF EXISTS idx_meetings_scheduled_at")
-    conn.execute("DROP INDEX IF EXISTS idx_meetings_chat_id")
-    conn.execute("DROP TABLE IF EXISTS chat_reminder_log")
-    conn.execute("DROP TABLE IF EXISTS chat_roles")
-    conn.execute("DROP TABLE IF EXISTS chat_lead_times")
-    conn.execute("DROP TABLE IF EXISTS settings")
-    conn.execute("DROP TABLE IF EXISTS locks")
-    conn.execute("DROP TABLE IF EXISTS audit_logs")
-    conn.execute("DROP TABLE IF EXISTS reminders")
-    conn.execute("DROP TABLE IF EXISTS meeting_participants")
-    conn.execute("DROP TABLE IF EXISTS meetings")
-    conn.execute("DROP TABLE IF EXISTS chats")
-    conn.execute("DROP TABLE IF EXISTS users")
-
-
-MIGRATIONS: Tuple[Migration, ...] = (
-    Migration(version=1, upgrade=_upgrade_v1, downgrade=_downgrade_v1),
+from .audit import AuditEvent
+from .entities import (
+    ChatSettings,
+    Meeting,
+    UserSettings,
+    ensure_chat_defaults,
+    ensure_user_defaults,
 )
+from .migrations import MIGRATIONS
+from .utils import (
+    RoleName,
+    ensure_timezone,
+    normalize_lead_times,
+    normalize_role,
+    utcnow,
+)
+
+
+__all__ = ["MeetingStorage"]
 
 
 class MeetingStorage:
@@ -454,6 +64,16 @@ class MeetingStorage:
             self._conn.execute("PRAGMA foreign_keys = ON")
         self._apply_migrations()
 
+    def __enter__(self) -> "MeetingStorage":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[override]
+        self.close()
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
     @property
     def timezone(self) -> ZoneInfo | None:
         """Return configured timezone, if any."""
@@ -461,7 +81,46 @@ class MeetingStorage:
         return self._timezone
 
     # ------------------------------------------------------------------
-    # migration helpers
+    # internal helpers
+    def _record_audit(
+        self,
+        *,
+        action: str,
+        entity_type: str,
+        entity_id: str | None,
+        payload: Dict[str, Any] | None = None,
+        user_id: int | None = None,
+    ) -> None:
+        event = AuditEvent(
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            payload=payload or None,
+            user_id=user_id,
+        )
+        self._conn.execute(
+            """
+            INSERT INTO audit_logs (at, who_user_id, action, entity_type, entity_id, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            event.as_db_tuple(),
+        )
+        try:
+            logger = get_category_logger(action)
+        except ValueError:
+            logger = logging.getLogger(action)
+        log_payload = payload or {}
+        logger.info(
+            "%s %s %s",
+            action,
+            entity_type,
+            entity_id or "-",
+            extra={"payload": log_payload, "user_id": user_id},
+        )
+
+    def _log_schema_change(self, message: str, *args: Any) -> None:
+        get_category_logger("schema").info(message, *args)
+
     def _get_schema_version(self) -> int:
         with self._conn:
             self._conn.execute(
@@ -488,21 +147,21 @@ class MeetingStorage:
             if current < target:
                 for migration in MIGRATIONS:
                     if migration.version > current:
-                        _logger.info("Applying migration %s", migration.version)
+                        self._log_schema_change("Applying migration %s", migration.version)
                         with self._conn:
                             migration.upgrade(self._conn)
                             self._set_schema_version(migration.version)
                         current = migration.version
-                _logger.info("Schema migrated to version %s", target)
+                self._log_schema_change("Schema migrated to version %s", target)
             elif current > target:
                 for migration in reversed(MIGRATIONS):
                     if migration.version <= current:
-                        _logger.info("Reverting migration %s", migration.version)
+                        self._log_schema_change("Reverting migration %s", migration.version)
                         with self._conn:
                             migration.downgrade(self._conn)
                             self._set_schema_version(migration.version - 1)
                         current = migration.version - 1
-                _logger.info("Schema downgraded to version %s", target)
+                self._log_schema_change("Schema downgraded to version %s", target)
 
     # ------------------------------------------------------------------
     # meeting management
@@ -537,6 +196,14 @@ class MeetingStorage:
             ).fetchall()
         return [self._row_to_meeting(row) for row in rows]
 
+    def find_meeting_by_request_number(self, request_number: str) -> Optional[Meeting]:
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM meetings WHERE ticket_no = ? AND status != 'canceled'",
+                (request_number,),
+            ).fetchone()
+        return self._row_to_meeting(row) if row else None
+
     def get_meeting(self, meeting_id: str) -> Optional[Meeting]:
         with self._lock, self._conn:
             row = self._conn.execute(
@@ -547,38 +214,27 @@ class MeetingStorage:
             return None
         return self._row_to_meeting(row)
 
-    def find_meeting_by_request_number(self, request_number: str) -> Optional[Meeting]:
-        with self._lock, self._conn:
-            row = self._conn.execute(
-                "SELECT * FROM meetings WHERE ticket_no = ? AND status != 'canceled'",
-                (request_number,),
-            ).fetchone()
-        if not row:
-            return None
-        return self._row_to_meeting(row)
-
     def create_meeting(
         self,
+        *,
         title: str,
         scheduled_at: datetime,
         organizer_id: int,
-        participants: Optional[Iterable[int]] = None,
+        participants: Sequence[int],
         description: Optional[str] = None,
-        *,
         meeting_type: Optional[str] = None,
         room: Optional[str] = None,
         request_number: Optional[str] = None,
         chat_id: Optional[int] = None,
     ) -> Meeting:
-        normalized_dt = _ensure_tz(scheduled_at, self._timezone)
-        normalized_dt = normalized_dt.astimezone(self._timezone or normalized_dt.tzinfo or timezone.utc)
+        normalized_dt = ensure_timezone(scheduled_at, self._timezone)
+        normalized_dt = normalized_dt.astimezone(
+            self._timezone or normalized_dt.tzinfo or timezone.utc
+        )
         utc_dt = normalized_dt.astimezone(timezone.utc)
-        scheduled_iso = normalized_dt.isoformat(timespec="seconds")
-        date_utc = utc_dt.date().isoformat()
-        time_utc = utc_dt.time().isoformat(timespec="seconds")
         meeting_id = str(uuid4())
-        created_at = _utcnow()
-        participant_ids = list(dict.fromkeys(int(pid) for pid in (participants or [organizer_id])))
+        created_at = utcnow()
+        participant_ids = [int(pid) for pid in participants]
         with self._lock, self._conn:
             self._conn.execute(
                 """
@@ -586,7 +242,8 @@ class MeetingStorage:
                     id, chat_id, creator_user_id, title, description, scheduled_at,
                     date_utc, start_time_utc, type, room, ticket_no, status,
                     reminder_sent, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', 0, ?, ?)
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', 0, ?, ?)
                 """,
                 (
                     meeting_id,
@@ -594,9 +251,9 @@ class MeetingStorage:
                     int(organizer_id),
                     title,
                     description,
-                    scheduled_iso,
-                    date_utc,
-                    time_utc,
+                    normalized_dt.isoformat(timespec="seconds"),
+                    utc_dt.date().isoformat(),
+                    utc_dt.time().isoformat(timespec="seconds"),
                     meeting_type,
                     room,
                     request_number,
@@ -607,6 +264,19 @@ class MeetingStorage:
             self._conn.executemany(
                 "INSERT OR IGNORE INTO meeting_participants (meeting_id, user_id) VALUES (?, ?)",
                 [(meeting_id, pid) for pid in participant_ids],
+            )
+            self._record_audit(
+                action="meeting_created",
+                entity_type="meeting",
+                entity_id=meeting_id,
+                user_id=int(organizer_id),
+                payload={
+                    "title": title,
+                    "scheduled_at": normalized_dt.isoformat(timespec="seconds"),
+                    "chat_id": chat_id,
+                    "participants": participant_ids,
+                    "request_number": request_number,
+                },
             )
         meeting = Meeting(
             id=meeting_id,
@@ -630,19 +300,27 @@ class MeetingStorage:
         with self._lock, self._conn:
             cur = self._conn.execute(
                 "UPDATE meetings SET status = 'canceled', updated_at = ? WHERE id = ?",
-                (_utcnow(), meeting_id),
+                (utcnow(), meeting_id),
             )
             if cur.rowcount:
                 self._conn.execute(
                     "DELETE FROM chat_reminder_log WHERE meeting_id = ?",
                     (meeting_id,),
                 )
+                self._record_audit(
+                    action="meeting_canceled",
+                    entity_type="meeting",
+                    entity_id=meeting_id,
+                    payload={},
+                )
                 return True
         return False
 
     def reschedule_meeting(self, meeting_id: str, scheduled_at: datetime) -> bool:
-        normalized_dt = _ensure_tz(scheduled_at, self._timezone)
-        normalized_dt = normalized_dt.astimezone(self._timezone or normalized_dt.tzinfo or timezone.utc)
+        normalized_dt = ensure_timezone(scheduled_at, self._timezone)
+        normalized_dt = normalized_dt.astimezone(
+            self._timezone or normalized_dt.tzinfo or timezone.utc
+        )
         utc_dt = normalized_dt.astimezone(timezone.utc)
         scheduled_iso = normalized_dt.isoformat(timespec="seconds")
         date_utc = utc_dt.date().isoformat()
@@ -655,12 +333,18 @@ class MeetingStorage:
                     status = 'moved', reminder_sent = 0, updated_at = ?
                 WHERE id = ?
                 """,
-                (scheduled_iso, date_utc, time_utc, _utcnow(), meeting_id),
+                (scheduled_iso, date_utc, time_utc, utcnow(), meeting_id),
             )
             if cur.rowcount:
                 self._conn.execute(
                     "DELETE FROM chat_reminder_log WHERE meeting_id = ?",
                     (meeting_id,),
+                )
+                self._record_audit(
+                    action="meeting_updated",
+                    entity_type="meeting",
+                    entity_id=meeting_id,
+                    payload={"scheduled_at": scheduled_iso},
                 )
                 return True
         return False
@@ -677,21 +361,28 @@ class MeetingStorage:
     ) -> Optional[Meeting]:
         fields: list[str] = []
         params: list[Any] = []
+        payload: Dict[str, Any] = {}
         if title is not None:
             fields.append("title = ?")
             params.append(title)
+            payload["title"] = title
         if meeting_type is not None:
             fields.append("type = ?")
             params.append(meeting_type)
+            payload["type"] = meeting_type
         if room is not None:
             fields.append("room = ?")
             params.append(room)
+            payload["room"] = room
         if request_number is not None:
             fields.append("ticket_no = ?")
             params.append(request_number)
+            payload["request_number"] = request_number
         if scheduled_at is not None:
-            normalized_dt = _ensure_tz(scheduled_at, self._timezone)
-            normalized_dt = normalized_dt.astimezone(self._timezone or normalized_dt.tzinfo or timezone.utc)
+            normalized_dt = ensure_timezone(scheduled_at, self._timezone)
+            normalized_dt = normalized_dt.astimezone(
+                self._timezone or normalized_dt.tzinfo or timezone.utc
+            )
             utc_dt = normalized_dt.astimezone(timezone.utc)
             fields.append("scheduled_at = ?")
             params.append(normalized_dt.isoformat(timespec="seconds"))
@@ -701,10 +392,11 @@ class MeetingStorage:
             params.append(utc_dt.time().isoformat(timespec="seconds"))
             fields.append("reminder_sent = 0")
             fields.append("status = 'moved'")
+            payload["scheduled_at"] = normalized_dt.isoformat(timespec="seconds")
         if not fields:
             return self.get_meeting(meeting_id)
         fields.append("updated_at = ?")
-        params.append(_utcnow())
+        params.append(utcnow())
         params.append(meeting_id)
         sql = "UPDATE meetings SET " + ", ".join(fields) + " WHERE id = ?"
         with self._lock, self._conn:
@@ -716,6 +408,12 @@ class MeetingStorage:
                     "DELETE FROM chat_reminder_log WHERE meeting_id = ?",
                     (meeting_id,),
                 )
+            self._record_audit(
+                action="meeting_updated",
+                entity_type="meeting",
+                entity_id=meeting_id,
+                payload=payload,
+            )
         return self.get_meeting(meeting_id)
 
     def mark_reminder_sent(self, meeting_id: str, chat_id: int, lead_time: int) -> None:
@@ -727,8 +425,14 @@ class MeetingStorage:
             if lead_time == 0:
                 self._conn.execute(
                     "UPDATE meetings SET reminder_sent = 1, updated_at = ? WHERE id = ?",
-                    (_utcnow(), meeting_id),
+                    (utcnow(), meeting_id),
                 )
+            self._record_audit(
+                action="reminder_sent",
+                entity_type="meeting",
+                entity_id=meeting_id,
+                payload={"chat_id": int(chat_id), "lead_time": int(lead_time)},
+            )
 
     def is_reminder_sent(self, meeting_id: str, chat_id: int, lead_time: int) -> bool:
         with self._lock, self._conn:
@@ -773,7 +477,7 @@ class MeetingStorage:
             ).fetchone()
         if not row:
             return None
-        return cast(RoleName, row[0]) if row[0] in _VALID_ROLES else None
+        return cast(RoleName, row[0]) if row[0] in ("admin", "user") else None
 
     def has_chat_role(self, chat_id: int, user_id: int, roles: Iterable[str]) -> bool:
         allowed = {role.strip().lower() for role in roles if role}
@@ -817,7 +521,9 @@ class MeetingStorage:
         timezone: Optional[str] = None,
         default_lead: Optional[int] = None,
     ) -> ChatSettings:
-        normalized_leads = self._normalize_lead_times(lead_times or self._default_lead_times or (1800, 600, 0))
+        normalized_leads = normalize_lead_times(
+            lead_times or self._default_lead_times or (1800, 600, 0)
+        )
         admins: list[int] = []
         for candidate in admin_ids or []:
             try:
@@ -826,7 +532,7 @@ class MeetingStorage:
                 continue
             if value not in admins:
                 admins.append(value)
-        now = _utcnow()
+        now = utcnow()
         with self._lock, self._conn:
             existing = self._conn.execute(
                 "SELECT 1 FROM chats WHERE chat_id = ?",
@@ -871,13 +577,24 @@ class MeetingStorage:
                     "INSERT OR REPLACE INTO chat_roles (chat_id, user_id, role) VALUES (?, ?, 'admin')",
                     (int(chat_id), int(admin_id)),
                 )
+            self._record_audit(
+                action="chat_updated",
+                entity_type="chat",
+                entity_id=str(chat_id),
+                payload={
+                    "title": title,
+                    "lead_times": normalized_leads,
+                    "admins": admins,
+                    "timezone": timezone,
+                },
+            )
         chat = self.get_chat(chat_id)
         if chat is None:
             raise RuntimeError("Failed to register chat")
         return chat
 
     def set_chat_lead_times(self, chat_id: int, lead_times: Sequence[int]) -> Optional[ChatSettings]:
-        normalized = self._normalize_lead_times(lead_times)
+        normalized = normalize_lead_times(lead_times)
         if not normalized:
             return None
         with self._lock, self._conn:
@@ -897,7 +614,13 @@ class MeetingStorage:
             )
             self._conn.execute(
                 "UPDATE chats SET updated_at = ? WHERE chat_id = ?",
-                (_utcnow(), int(chat_id)),
+                (utcnow(), int(chat_id)),
+            )
+            self._record_audit(
+                action="chat_updated",
+                entity_type="chat",
+                entity_id=str(chat_id),
+                payload={"lead_times": normalized},
             )
         return self.get_chat(chat_id)
 
@@ -908,7 +631,7 @@ class MeetingStorage:
         return self.set_chat_role(chat_id, user_id, "user")
 
     def set_chat_role(self, chat_id: int, user_id: int, role: str) -> Optional[ChatSettings]:
-        normalized_role = _normalize_role(role)
+        normalized_role = normalize_role(role)
         if normalized_role is None:
             return None
         with self._lock, self._conn:
@@ -924,7 +647,13 @@ class MeetingStorage:
             )
             self._conn.execute(
                 "UPDATE chats SET updated_at = ? WHERE chat_id = ?",
-                (_utcnow(), int(chat_id)),
+                (utcnow(), int(chat_id)),
+            )
+            self._record_audit(
+                action="chat_updated",
+                entity_type="chat",
+                entity_id=str(chat_id),
+                payload={"user_id": int(user_id), "role": normalized_role},
             )
         return self.get_chat(chat_id)
 
@@ -942,7 +671,13 @@ class MeetingStorage:
             )
             self._conn.execute(
                 "UPDATE chats SET updated_at = ? WHERE chat_id = ?",
-                (_utcnow(), int(chat_id)),
+                (utcnow(), int(chat_id)),
+            )
+            self._record_audit(
+                action="chat_updated",
+                entity_type="chat",
+                entity_id=str(chat_id),
+                payload={"user_id": int(user_id), "role": None},
             )
         return self.get_chat(chat_id)
 
@@ -967,6 +702,12 @@ class MeetingStorage:
                 "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (name, str(value)),
             )
+            self._record_audit(
+                action="settings_updated",
+                entity_type="setting",
+                entity_id=name,
+                payload={"value": value},
+            )
 
     def get_user_settings(self, user_id: int) -> UserSettings:
         with self._lock, self._conn:
@@ -976,7 +717,12 @@ class MeetingStorage:
             ).fetchone()
         if not row:
             settings = UserSettings(id=int(user_id))
-            return self._ensure_user_defaults(settings)
+            return ensure_user_defaults(
+                settings,
+                default_lead_time=self._default_user_lead_time,
+                default_locale=self._default_locale,
+                default_timezone=self._default_timezone_name,
+            )
         payload = {
             "id": row["user_id"],
             "timezone": row["tz"],
@@ -989,11 +735,21 @@ class MeetingStorage:
             "updated_at": row["updated_at"],
         }
         settings = UserSettings.from_dict(payload)
-        return self._ensure_user_defaults(settings)
+        return ensure_user_defaults(
+            settings,
+            default_lead_time=self._default_user_lead_time,
+            default_locale=self._default_locale,
+            default_timezone=self._default_timezone_name,
+        )
 
     def save_user_settings(self, settings: UserSettings) -> UserSettings:
-        normalized = self._ensure_user_defaults(settings)
-        now = _utcnow()
+        normalized = ensure_user_defaults(
+            settings,
+            default_lead_time=self._default_user_lead_time,
+            default_locale=self._default_locale,
+            default_timezone=self._default_timezone_name,
+        )
+        now = utcnow()
         with self._lock, self._conn:
             self._conn.execute(
                 """
@@ -1020,6 +776,13 @@ class MeetingStorage:
                     now,
                 ),
             )
+            self._record_audit(
+                action="settings_updated",
+                entity_type="user",
+                entity_id=str(normalized.id),
+                user_id=int(normalized.id),
+                payload=normalized.to_dict(),
+            )
         refreshed = self.get_user_settings(normalized.id)
         return refreshed
 
@@ -1041,7 +804,7 @@ class MeetingStorage:
             ).fetchall()
         participant_ids = [int(item[0]) for item in participants]
         scheduled = datetime.fromisoformat(row["scheduled_at"])
-        scheduled = _ensure_tz(scheduled, self._timezone)
+        scheduled = ensure_timezone(scheduled, self._timezone)
         created = datetime.fromisoformat(row["created_at"]) if row["created_at"] else None
         updated = datetime.fromisoformat(row["updated_at"]) if row["updated_at"] else None
         meeting = Meeting(
@@ -1080,7 +843,7 @@ class MeetingStorage:
         lead_times = [int(item[0]) for item in leads]
         roles_map: dict[int, RoleName] = {}
         for user_id, role in roles:
-            normalized_role = _normalize_role(role)
+            normalized_role = normalize_role(role)
             if normalized_role is None:
                 continue
             roles_map[int(user_id)] = normalized_role
@@ -1098,61 +861,9 @@ class MeetingStorage:
             "default_lead": row["default_lead"],
             "is_active": bool(row["is_active"]),
         }
-        return self._ensure_chat_defaults(ChatSettings.from_dict(payload))
-
-    def _ensure_chat_defaults(self, chat: ChatSettings) -> ChatSettings:
-        if not chat.lead_times:
-            default = self._default_lead_times or (1800, 600, 0)
-            chat.lead_times = list(default)
-        chat.lead_times = self._normalize_lead_times(chat.lead_times)
-        if not chat.timezone and self._default_timezone_name:
-            chat.timezone = self._default_timezone_name
-        normalized_roles: dict[int, RoleName] = {}
-        for user_id, role in chat.roles.items():
-            try:
-                normalized_user = int(user_id)
-            except (TypeError, ValueError):
-                continue
-            normalized_role = _normalize_role(role)
-            if normalized_role is None:
-                continue
-            normalized_roles[normalized_user] = normalized_role
-        chat.roles = normalized_roles
-        chat.admin_ids = [user_id for user_id, role in chat.roles.items() if role == "admin"]
-        chat.reminder_log = {
-            meeting_id: self._normalize_lead_times(values)
-            for meeting_id, values in chat.reminder_log.items()
-        }
-        return chat
-
-    def _ensure_user_defaults(self, settings: UserSettings) -> UserSettings:
-        if settings.created_at is None:
-            settings.default_lead_time = self._default_user_lead_time
-        if not settings.locale or settings.created_at is None:
-            settings.locale = self._default_locale
-        if not settings.timezone and self._default_timezone_name:
-            settings.timezone = self._default_timezone_name
-        if not settings.date_format:
-            settings.date_format = "%d.%m.%Y"
-        if not settings.time_format:
-            settings.time_format = "%H:%M"
-        if settings.default_lead_time < 0:
-            settings.default_lead_time = 0
-        if settings.role not in _VALID_ROLES:
-            settings.role = "user"
-        return settings
-
-    def _normalize_lead_times(self, values: Sequence[int] | Iterable[int]) -> List[int]:
-        normalized: list[int] = []
-        for value in values:
-            try:
-                seconds = int(value)
-            except (TypeError, ValueError):
-                continue
-            if seconds < 0:
-                continue
-            normalized.append(seconds)
-        if not normalized:
-            return []
-        return sorted(dict.fromkeys(normalized))
+        return ensure_chat_defaults(
+            ChatSettings.from_dict(payload),
+            default_lead_times=self._default_lead_times,
+            default_timezone=self._default_timezone_name,
+        )
 
