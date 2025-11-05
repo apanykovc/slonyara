@@ -345,7 +345,10 @@ def create_router(
         if not message.text or message.text.startswith("/"):
             return
         now = current_time()
-        command = parse_meeting_command(message.text, now)
+        command, error = parse_meeting_command(message.text, now)
+        if error:
+            await message.answer(error)
+            return
         if not command:
             return
         try:
